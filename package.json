@@ -1,0 +1,17 @@
+{
+  "name": "quectogpt",
+  "version": "1.0.0",
+  "description": "The most atomic way to train a GPT — now in JavaScript with WebGPU acceleration.",
+  "type": "module",
+  "main": "bench.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@jax-js/jax": "^0.1.9",
+    "@jax-js/optax": "^0.1.2"
+  }
+}
