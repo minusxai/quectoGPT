@@ -13,14 +13,14 @@ quectoGPT is a JavaScript port of Karpathy's microgpt.py — a minimal GPT train
 deno run --allow-read --allow-net --allow-env train.js
 deno run --allow-read --allow-net --allow-env train.js --backend=cpu --steps=100
 
-# Train (WebGPU)
-deno run --allow-read --allow-net --allow-env --unstable-webgpu train.js --backend=webgpu --steps=100
+# Train (WebGPU — browser only, jax-js requires OffscreenCanvas)
+# Open index.html in Chrome for GPU training
 
 # Benchmarks (CPU/Wasm)
 deno run --allow-read --allow-net --allow-env bench.js
 
-# Benchmarks (WebGPU)
-deno run --allow-read --allow-net --allow-env --unstable-webgpu bench.js --gpu
+# Benchmarks (WebGPU — browser only, jax-js requires OffscreenCanvas)
+# Open bench.html in Chrome for GPU benchmarks
 
 # Browser: serve and open index.html (training) or bench.html (benchmarks)
 python -m http.server
@@ -29,7 +29,7 @@ python -m http.server
 
 ## Architecture
 
-- **@jax-js/jax + @jax-js/optax** (npm packages). Provides `numpy`, `nn`, `grad`, `valueAndGrad`, `random`, `tree`, and `optax` (adam optimizer). Backends: `"wasm"` (fast, default), `"webgpu"` (GPU), `"cpu"` (slow JS interpreter for debugging).
+- **@jax-js/jax + @jax-js/optax** (npm packages). Provides `numpy`, `nn`, `grad`, `valueAndGrad`, `random`, `tree`, and `optax` (adam optimizer). Backends: `"wasm"` (fast, default), `"webgpu"` (GPU, browser only — requires OffscreenCanvas which Deno lacks), `"cpu"` (slow JS interpreter for debugging).
 - **gpt.js** — model definition as pure functions:
   - `MODEL_CONFIGS` — nano/tiny/small/medium/large presets
   - `initParams(vocabSize, cfg, rngKey)` — returns nested pytree `{ wte, wpe, lmHead, layers: [{wq, wk, wv, wo, mlpFc1, mlpFc2}, ...] }`

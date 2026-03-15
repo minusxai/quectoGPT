@@ -64,12 +64,9 @@ deno run --allow-read --allow-net --allow-env train.js --model=small --steps=200
 deno run --allow-read --allow-net --allow-env train.js --model=medium
 ```
 
-### Train (WebGPU)
+### Train (WebGPU — browser only)
 
-```bash
-deno run --allow-read --allow-net --allow-env --unstable-webgpu train.js --backend=webgpu --model=small
-deno run --allow-read --allow-net --allow-env --unstable-webgpu train.js --backend=webgpu --model=medium --steps=100
-```
+jax-js's WebGPU backend requires `OffscreenCanvas`, which is only available in browsers (not Deno CLI). Open `index.html` in Chrome for GPU training.
 
 ### Benchmarks
 
@@ -85,7 +82,7 @@ deno run --allow-read --allow-net --allow-env --unstable-webgpu bench.js --gpu
 
 Serve the directory and open `index.html` or `bench.html`:
 ```bash
-python -m http.server
+uv run python -m http.server
 # or: npx serve .
 ```
 
