@@ -20,7 +20,7 @@ export function resolveConfig(name) {
 
 // Helper: get the i-th key from a [N, 2] keys array
 function getKey(keys, i) {
-  return keys.slice([i, 0], [i + 1, 2]).reshape([2]);
+  return keys.ref.slice(i);
 }
 
 // --- Parameter initialization ---
@@ -136,9 +136,8 @@ export async function inference(params, cfg, tokenizer, rngKey, opts = {}) {
 
       const logits = forward(tree.ref(params), cfg, inputIds, posIds);
 
-      // Take logits for last position
-      const seqLen = tokenIds.length;
-      const lastLogits = logits.slice([seqLen - 1, 0], [seqLen, tokenizer.vocabSize]).reshape([tokenizer.vocabSize]);
+      // Take logits for last position: logits[seqLen-1, :] -> [vocabSize]
+      const lastLogits = logits.slice(tokenIds.length - 1);
 
       // Temperature scaling
       const scaled = temperature !== 1.0 ? lastLogits.div(temperature) : lastLogits;
