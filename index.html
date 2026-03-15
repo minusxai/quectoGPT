@@ -479,7 +479,7 @@
 
   <div class="chart-section">
     <div class="chart-wrap">
-      <span class="chart-label">loss / step</span>
+      <span class="chart-label">loss / step &nbsp; <span style="color:var(--accent)">&#9644; train</span> &nbsp; <span style="color:var(--amber)">&#9644; val</span></span>
       <canvas id="chart"></canvas>
     </div>
     <div class="chart-sidebar">
@@ -502,6 +502,14 @@
     </div>
 
     <div class="control-group">
+      <span class="control-label">Dataset</span>
+      <select class="input-field" id="input-dataset" style="width:auto;text-align:left">
+        <option value="names">names</option>
+        <option value="shakespeare">shakespeare</option>
+      </select>
+    </div>
+
+    <div class="control-group">
       <span class="control-label">Model</span>
       <select class="input-field" id="input-model" style="width:auto;text-align:left">
         <option value="nano">nano (~4K)</option>
@@ -515,6 +523,11 @@
     <div class="control-group">
       <span class="control-label">Steps</span>
       <input type="number" class="input-field" id="input-steps" value="" min="1" max="50000" placeholder="auto">
+    </div>
+
+    <div class="control-group">
+      <span class="control-label">Prompt</span>
+      <input type="text" class="input-field" id="input-prompt" value="" placeholder="(optional)" style="width:140px;text-align:left">
     </div>
   </div>
 
@@ -535,12 +548,13 @@
 </script>
 <script type="module">
 import { init, defaultDevice } from '@jax-js/jax';
-import { train } from './train.js';
+import { train, buildBPETokenizer } from './train.js';
 
 // --- State ---
 let running = false;
 let abortFlag = false;
 let lossHistory = [];
+let valLossHistory = []; // { step, loss } pairs
 let selectedBackend = 'cpu';
 let hasWebGPU = false;
 let jaxDevices = [];
@@ -606,6 +620,10 @@ function drawChart() {
     if (v < minL) minL = v;
     if (v > maxL) maxL = v;
   }
+  for (const { loss: vl } of valLossHistory) {
+    if (vl < minL) minL = vl;
+    if (vl > maxL) maxL = vl;
+  }
   // Add 10% padding
   const range = maxL - minL || 1;
   minL -= range * 0.05;
@@ -656,6 +674,26 @@ function drawChart() {
   ctx.shadowBlur = 10;
   ctx.fill();
   ctx.shadowBlur = 0;
+
+  // Val loss line (amber)
+  if (valLossHistory.length >= 2) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.strokeStyle = '#ffaa22';
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = 'round';
+    ctx.setLineDash([4, 3]);
+    for (let i = 0; i < valLossHistory.length; i++) {
+      const { step, loss: vl } = valLossHistory[i];
+      const x = pad.left + (step / (lossHistory.length - 1)) * plotW;
+      const y = pad.top + (1 - (vl - minL) / (maxL - minL)) * plotH;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
 }
 
 function drawGrid(W, H, minY, maxY, minX, maxX, pad) {
@@ -747,20 +785,30 @@ $('btn-start').onclick = async () => {
   running = true;
   abortFlag = false;
   lossHistory = [];
+  valLossHistory = [];
 
   $('btn-start').disabled = true;
   $('btn-stop').disabled = false;
   $('tog-cpu').disabled = true;
   $('tog-gpu').disabled = true;
   $('input-model').disabled = true;
+  $('input-dataset').disabled = true;
   $('stat-status').textContent = 'loading data…';
   $('samples-body').innerHTML = '<div class="samples-empty">Training in progress…</div>';
 
   try {
-    // Load data
-    const resp = await fetch('input.txt');
-    const text = await resp.text();
-    const docs = text.split('\n').filter(l => l.trim());
+    const dataset = $('input-dataset').value;
+
+    // Load tokenizer
+    const tokResp = await fetch(`data/${dataset}.tok.json`);
+    const tokJson = await tokResp.json();
+    const tokenizer = buildBPETokenizer(tokJson.merges);
+
+    // Load pre-tokenized binary data
+    const trainResp = await fetch(`data/${dataset}.train.bin`);
+    const trainData = new Uint16Array(await trainResp.arrayBuffer());
+    const valResp = await fetch(`data/${dataset}.val.bin`);
+    const valData = new Uint16Array(await valResp.arrayBuffer());
 
     // Init backend
     const device = selectedBackend === 'gpu' ? 'webgpu' : 'wasm';
@@ -768,9 +816,11 @@ $('btn-start').onclick = async () => {
 
     const model = $('input-model').value;
     const stepsVal = $('input-steps').value.trim();
+    const promptVal = $('input-prompt').value.trim();
     const trainOpts = { model };
     if (stepsVal) trainOpts.steps = parseInt(stepsVal);
-    const gen = train(device, docs, trainOpts);
+    if (promptVal) trainOpts.prompt = promptVal;
+    const gen = train(device, trainData, valData, tokenizer, trainOpts);
 
     const t0 = performance.now();
     let stepCount = 0;
@@ -794,6 +844,9 @@ $('btn-start').onclick = async () => {
       if (event.type === 'step') {
         stepCount++;
         lossHistory.push(event.loss);
+        if (event.valLoss !== undefined) {
+          valLossHistory.push({ step: stepCount - 1, loss: event.valLoss });
+        }
         updateStats(event);
 
         const elapsed = performance.now() - t0;
@@ -835,6 +888,7 @@ $('btn-start').onclick = async () => {
   $('tog-cpu').disabled = false;
   $('tog-gpu').disabled = !hasWebGPU;
   $('input-model').disabled = false;
+  $('input-dataset').disabled = false;
 };
 
 $('btn-stop').onclick = () => { abortFlag = true; };
