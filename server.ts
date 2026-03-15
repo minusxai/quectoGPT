@@ -269,8 +269,9 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
-// HTTP handler
-Deno.serve({ port: 4000 }, async (req) => {
+// HTTP handler — PORT env var lets Docker override the default dev port
+const PORT = parseInt(Deno.env.get("PORT") ?? "4000");
+Deno.serve({ port: PORT }, async (req) => {
   const url = new URL(req.url);
   const { pathname } = url;
   const method = req.method;

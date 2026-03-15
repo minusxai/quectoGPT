@@ -1,0 +1,23 @@
+name: Deploy on master branch
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Set up SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.PROD_SERVER_SSH_KEY_V2 }}" > ~/.ssh/id_rsa
+        echo "${{ secrets.PROD_SERVER_SSH_PUB_KEY_V2 }}" > ~/.ssh/id_rsa.pub
+        chmod 600 ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa.pub
+        ssh-keyscan -H v2.minusxapi.com >> ~/.ssh/known_hosts
+
+    - name: SSH, pull repo, rebuild and restart server
+      run: |
+        ssh minusx@v2.minusxapi.com "cd /home/minusx/quectoGPT && git pull origin master && docker compose build server && sleep 10 && docker compose up -d --no-deps server"

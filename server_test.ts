@@ -98,7 +98,7 @@ function mockTrain(
 
 Deno.test({ name: "setup: start server", sanitizeOps: false, sanitizeResources: false }, async () => {
   serverProcess = new Deno.Command(Deno.execPath(), {
-    args: ["run", "--allow-net", "server.ts"],
+    args: ["run", "--allow-net", "--allow-env", "server.ts"],
     stdout: "null",
     stderr: "null",
   }).spawn();
@@ -1214,5 +1214,5 @@ Deno.test({ name: "WS error handling: missing train_id, unknown type, invalid se
 // ─── Teardown ─────────────────────────────────────────────────────────────────
 
 Deno.test({ name: "teardown: stop server", sanitizeOps: false, sanitizeResources: false }, () => {
-  serverProcess.kill();
+  try { serverProcess.kill(); } catch { /* already exited */ }
 });

@@ -825,8 +825,12 @@ let newRoundWeights = null;   // set by update msg → triggers training restart
 let roundStartFlat = null;    // flat weights at start of current round
 let trainingHandle = {};      // shared with train() to read live flat weights
 
-const SERVER = 'http://localhost:4000';
-const SERVER_WS = 'ws://localhost:4000/ws';
+// In production, nginx proxies /train and /ws from the same origin (port 7011).
+// In local dev, the Deno server runs separately on localhost:4000.
+const _dev = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+const SERVER    = _dev ? 'http://localhost:4000' : location.origin;
+const SERVER_WS = _dev ? 'ws://localhost:4000/ws'
+                       : (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/ws';
 const DEFAULT_ROUND_SECS = 15;   // sync interval — round duration in seconds
 const DEFAULT_GRACE_SECS = 3;    // grace period before round closes
 

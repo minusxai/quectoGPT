@@ -135,7 +135,7 @@ Multiple browser tabs or devices can train collaboratively via the coordination 
 ### Start the server
 
 ```bash
-deno run --allow-net server.ts
+deno run --allow-net --allow-env server.ts
 # Listens on :4000
 ```
 
