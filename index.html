@@ -684,7 +684,7 @@
       <span class="control-label">Dataset</span>
       <select class="input-field" id="input-dataset" style="width:auto;text-align:left">
         <option value="names">names</option>
-        <option value="shakespeare">shakespeare</option>
+        <option value="shakespeare" selected>shakespeare</option>
       </select>
     </div>
 
@@ -692,7 +692,7 @@
       <span class="control-label">Model</span>
       <select class="input-field" id="input-model" style="width:auto;text-align:left">
         <option value="nano">nano (~4K)</option>
-        <option value="tiny">tiny (~50K)</option>
+        <option value="tiny" selected>tiny (~50K)</option>
         <option value="small">small (~500K)</option>
         <option value="medium">medium (~4M)</option>
         <option value="large">large (~25M)</option>
@@ -701,17 +701,17 @@
 
     <div class="control-group">
       <span class="control-label">Steps</span>
-      <input type="number" class="input-field" id="input-steps" value="" min="1" max="50000" placeholder="auto">
+      <input type="number" class="input-field" id="input-steps" value="600" min="1" max="50000" placeholder="auto">
     </div>
 
     <div class="control-group">
       <span class="control-label">Val every</span>
-      <input type="number" class="input-field" id="input-valevery" value="" min="1" max="50000" placeholder="auto">
+      <input type="number" class="input-field" id="input-valevery" value="25" min="1" max="50000" placeholder="auto">
     </div>
 
     <div class="control-group">
       <span class="control-label">Prompt</span>
-      <input type="text" class="input-field" id="input-prompt" value="" placeholder="(optional)" style="width:140px;text-align:left">
+      <input type="text" class="input-field" id="input-prompt" value="To be" placeholder="(optional)" style="width:140px;text-align:left">
     </div>
   </div>
 
@@ -868,6 +868,10 @@ const ctx = chart.getContext('2d');
     if (jaxDevices.includes('webgpu')) {
       hasWebGPU = true;
       $('tog-gpu').disabled = false;
+      // Default to WebGPU when available
+      selectedBackend = 'gpu';
+      $('tog-gpu').classList.add('selected');
+      $('tog-cpu').classList.remove('selected');
     }
   } catch (e) {
     console.warn('jax-js init:', e);
