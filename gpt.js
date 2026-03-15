@@ -67,12 +67,14 @@ function linear(x, w) {
 }
 
 // --- Forward pass ---
-export function forward(params, cfg, inputIds, posIds) {
+// tokenOH/posOH: pre-computed oneHot matrices [seqLen, vocabSize] and [seqLen, blockSize]
+// These must be computed OUTSIDE valueAndGrad to avoid tracing issues.
+export function forward(params, cfg, tokenOH, posOH, seqLen) {
   const headDim = cfg.nEmbd / cfg.nHead;
 
-  // Token + position embeddings
-  let x = np.take(params.wte, inputIds, 0);
-  const posEmb = np.take(params.wpe, posIds, 0);
+  // Token + position embeddings via oneHot @ weight
+  let x = np.matmul(tokenOH, params.wte);     // [seqLen, nEmbd]
+  const posEmb = np.matmul(posOH, params.wpe); // [seqLen, nEmbd]
   x = rmsnorm(x.add(posEmb));
 
   for (let li = 0; li < cfg.nLayer; li++) {
@@ -86,7 +88,6 @@ export function forward(params, cfg, inputIds, posIds) {
     const v = linear(x, layer.wv);
 
     // Reshape to [seqLen, nHead, headDim] for dotProductAttention
-    const seqLen = inputIds.shape[0];
     const qH = q.reshape([seqLen, cfg.nHead, headDim]);
     const kH = k.reshape([seqLen, cfg.nHead, headDim]);
     const vH = v.reshape([seqLen, cfg.nHead, headDim]);
@@ -110,11 +111,11 @@ export function forward(params, cfg, inputIds, posIds) {
 }
 
 // --- Loss function ---
-export function loss(params, cfg, inputIds, posIds, targetIds, vocabSize) {
-  const logits = forward(params, cfg, inputIds, posIds);
+// tokenOH, posOH, targetOH: pre-computed oneHot matrices (outside valueAndGrad)
+export function loss(params, cfg, tokenOH, posOH, targetOH, seqLen) {
+  const logits = forward(params, cfg, tokenOH, posOH, seqLen);
   const logprobs = nn.logSoftmax(logits, -1);
-  const oneHot = nn.oneHot(targetIds, vocabSize);
-  return np.mean(np.sum(logprobs.mul(oneHot), -1)).neg();
+  return np.mean(np.sum(logprobs.mul(targetOH), -1)).neg();
 }
 
 // --- Inference (sequential, no KV cache for simplicity) ---
@@ -131,13 +132,16 @@ export async function inference(params, cfg, tokenizer, rngKey, opts = {}) {
     const generated = [];
 
     for (let pos = 0; pos < cfg.blockSize; pos++) {
+      const seqLen = tokenIds.length;
       const inputIds = np.array(new Int32Array(tokenIds), { dtype: np.int32 });
-      const posIds = np.arange(tokenIds.length, { dtype: np.int32 });
+      const posIds = np.arange(seqLen).astype(np.int32);
+      const tokenOH = nn.oneHot(inputIds, tokenizer.vocabSize);
+      const posOH = nn.oneHot(posIds, cfg.blockSize);
 
-      const logits = forward(tree.ref(params), cfg, inputIds, posIds);
+      const logits = forward(tree.ref(params), cfg, tokenOH, posOH, seqLen);
 
       // Take logits for last position: logits[seqLen-1, :] -> [vocabSize]
-      const lastLogits = logits.slice(tokenIds.length - 1);
+      const lastLogits = logits.slice(seqLen - 1);
 
       // Temperature scaling
       const scaled = temperature !== 1.0 ? lastLogits.div(temperature) : lastLogits;

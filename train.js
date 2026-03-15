@@ -3,7 +3,7 @@
 // Deno: deno run --allow-read --allow-net --unstable-webgpu train.js --backend=webgpu --model=medium
 // Browser: imported by index.html
 
-import { init, defaultDevice, numpy as np, valueAndGrad, random, tree, blockUntilReady } from '@jax-js/jax';
+import { init, defaultDevice, numpy as np, nn, valueAndGrad, random, tree } from '@jax-js/jax';
 import { adam, applyUpdates } from '@jax-js/optax';
 import { MODEL_CONFIGS, resolveConfig, initParams, loss, inference } from './gpt.js';
 
@@ -77,18 +77,21 @@ export async function* train(backendName, docs, opts = {}) {
     const n = Math.min(cfg.blockSize, tokens.length - 1);
 
     const inputIds = np.array(new Int32Array(tokens.slice(0, n)), { dtype: np.int32 });
-    const posIds = np.arange(n, { dtype: np.int32 });
+    const posIds = np.arange(n).astype(np.int32);
     const targetIds = np.array(new Int32Array(tokens.slice(1, n + 1)), { dtype: np.int32 });
 
-    // Forward + backward
-    const lossFn = (p) => loss(p, cfg, inputIds, posIds, targetIds, tokenizer.vocabSize);
-    const [lossVal, grads] = valueAndGrad(lossFn)(params);
+    // Pre-compute oneHot matrices OUTSIDE valueAndGrad (avoids tracing issues)
+    const tokenOH = nn.oneHot(inputIds, tokenizer.vocabSize);
+    const posOH = nn.oneHot(posIds, cfg.blockSize);
+    const targetOH = nn.oneHot(targetIds, tokenizer.vocabSize);
+
+    // Forward + backward (ref params since valueAndGrad consumes its arg)
+    const lossFn = (p) => loss(p, cfg, tokenOH.ref, posOH.ref, targetOH.ref, n);
+    const [lossVal, grads] = valueAndGrad(lossFn)(tree.ref(params));
 
     // Optimizer step
     const [updates, newOptState] = solver.update(grads, optState, tree.ref(params));
-    const newParams = applyUpdates(params, updates);
-    tree.dispose(optState);
-    params = newParams;
+    params = applyUpdates(params, updates);
     optState = newOptState;
 
     // Read loss
