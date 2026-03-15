@@ -77,7 +77,83 @@ function getAllParams(stateDict) {
   return Object.values(stateDict);
 }
 
-// --- Single-token GPT forward (used for both training and inference) ---
+// --- Batched GPT forward for training ---
+// Processes entire sequence at once: [n, embd] tensors through all layers.
+// Uses causal mask for attention instead of sequential KV cache.
+function gptForward(tokens, stateDict, cfg, backend) {
+  const seqLen = tokens.length - 1;
+  const n = Math.min(cfg.blockSize, seqLen);
+
+  const inputIds = new Int32Array(n);
+  const posIds = new Int32Array(n);
+  const targetIds = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    inputIds[i] = tokens[i];
+    posIds[i] = i;
+    targetIds[i] = tokens[i + 1];
+  }
+
+  // Token + position embeddings: [n, embd]
+  let x = ops.embedding(stateDict.wte, inputIds);
+  const posEmb = ops.embedding(stateDict.wpe, posIds);
+  x = ops.add(x, posEmb);
+  x = ops.rmsnorm(x);
+
+  for (let li = 0; li < cfg.nLayer; li++) {
+    const xResidual = x;
+    x = ops.rmsnorm(x);
+
+    // QKV for full sequence: [n, embd]
+    const q = ops.matmulWT(x, stateDict[`layer${li}.attn_wq`]);
+    const k = ops.matmulWT(x, stateDict[`layer${li}.attn_wk`]);
+    const v = ops.matmulWT(x, stateDict[`layer${li}.attn_wv`]);
+
+    // Multi-head attention (batched per head)
+    const headOuts = [];
+    for (let h = 0; h < cfg.nHead; h++) {
+      const hs = h * cfg.headDim;
+      const qH = ops.sliceCols(q, hs, cfg.headDim);  // [n, headDim]
+      const kH = ops.sliceCols(k, hs, cfg.headDim);  // [n, headDim]
+      const vH = ops.sliceCols(v, hs, cfg.headDim);  // [n, headDim]
+
+      // scores = Q @ K^T / sqrt(headDim) -> [n, n]
+      const kT = ops.transpose2D(kH);                 // [headDim, n]
+      let scores = ops.matmul(qH, kT);                // [n, n]
+      scores = ops.scale(scores, 1.0 / Math.sqrt(cfg.headDim));
+
+      // Causal mask + softmax
+      scores = ops.causalMask(scores);                 // upper tri -> -inf
+      const attnWeights = ops.softmax(scores);         // [n, n]
+
+      // Weighted sum of values
+      const headOut = ops.matmul(attnWeights, vH);     // [n, headDim]
+      headOuts.push(headOut);
+    }
+
+    // Concat heads -> [n, embd]
+    const xAttn = ops.concatCols(headOuts);
+
+    // Output projection + residual
+    x = ops.matmulWT(xAttn, stateDict[`layer${li}.attn_wo`]);
+    x = ops.add(x, xResidual);
+
+    // MLP block
+    const mlpResidual = x;
+    x = ops.rmsnorm(x);
+    x = ops.matmulWT(x, stateDict[`layer${li}.mlp_fc1`]);  // [n, 4*embd]
+    x = ops.relu(x);
+    x = ops.matmulWT(x, stateDict[`layer${li}.mlp_fc2`]);  // [n, embd]
+    x = ops.add(x, mlpResidual);
+  }
+
+  // Logits + loss
+  const logits = ops.matmulWT(x, stateDict.lm_head);  // [n, vocabSize]
+  const loss = ops.crossEntropyLoss(logits, targetIds);
+
+  return { loss, logits, n };
+}
+
+// --- Single-token forward for inference (sequential with KV cache) ---
 function gptForwardToken(tokenId, posId, kvCache, stateDict, cfg, backend) {
   const tokenIds = new Int32Array([tokenId]);
   const posIds = new Int32Array([posId]);
@@ -101,7 +177,6 @@ function gptForwardToken(tokenId, posId, kvCache, stateDict, cfg, backend) {
     const headOuts = [];
     for (let h = 0; h < cfg.nHead; h++) {
       const hs = h * cfg.headDim;
-
       const qH = ops.sliceCols(q, hs, cfg.headDim);
       const numKeys = kvCache[li].keys.length;
 
@@ -123,7 +198,6 @@ function gptForwardToken(tokenId, posId, kvCache, stateDict, cfg, backend) {
     }
 
     const xAttn = ops.concatCols(headOuts);
-
     row = ops.matmulWT(xAttn, stateDict[`layer${li}.attn_wo`]);
     row = ops.add(row, rowResidual);
 
@@ -136,30 +210,6 @@ function gptForwardToken(tokenId, posId, kvCache, stateDict, cfg, backend) {
   }
 
   return row;
-}
-
-// --- Full forward pass for training: process a document ---
-function gptForward(tokens, stateDict, cfg, backend) {
-  const seqLen = tokens.length - 1;
-  const n = Math.min(cfg.blockSize, seqLen);
-
-  const kvCache = [];
-  for (let li = 0; li < cfg.nLayer; li++) kvCache.push({ keys: [], values: [] });
-
-  const outputRows = [];
-  const targetIds = new Int32Array(n);
-
-  for (let pos = 0; pos < n; pos++) {
-    targetIds[pos] = tokens[pos + 1];
-    const row = gptForwardToken(tokens[pos], pos, kvCache, stateDict, cfg, backend);
-    outputRows.push(row);
-  }
-
-  const output = ops.stackRows(outputRows);
-  const logits = ops.matmulWT(output, stateDict.lm_head);
-  const loss = ops.crossEntropyLoss(logits, targetIds);
-
-  return { loss, logits, n };
 }
 
 // --- Inference ---
@@ -245,6 +295,7 @@ export async function* train(backend, docs, opts = {}) {
   yield { type: 'init', vocabSize: tokenizer.vocabSize, paramCount, backend: backend.name, model: modelName, cfg };
 
   for (let step = 0; step < numSteps; step++) {
+    if (backend.recycleBuffers) backend.recycleBuffers();
     clearTape();
     zeroGrad(params);
 

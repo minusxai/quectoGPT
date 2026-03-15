@@ -177,6 +177,21 @@ export function softmax(x) {
   });
 }
 
+// Causal mask: set upper triangular (col > row) to -inf
+export function causalMask(x) {
+  const size = x.shape[0]; // square matrix [size, size]
+  const handle = x.backend.causalMask(x.handle, size);
+  const out = new Tensor(handle, [size, size], x.backend);
+  return record(out, 'causalMask', [x], () => {
+    out.ensureGrad();
+    if (needsGrad(x)) {
+      x.ensureGrad();
+      const dx = x.backend.causalMaskBackward(out.grad.handle, size);
+      x.backend.accumulate(x.grad.handle, dx, size * size);
+    }
+  });
+}
+
 // --- Data movement ops (differentiable) ---
 
 // Slice columns: x[rows, totalCols] → out[rows, width] from colStart

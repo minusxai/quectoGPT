@@ -40,18 +40,32 @@ export async function initWebGPU() {
     return device.createBuffer({ size: Math.max(floatCount * 4, 4), usage: STORAGE });
   }
 
+  // Uniform buffer pool — avoid creating hundreds of tiny GPU buffers per step.
+  // All uniform bufs are ≤32 bytes (8 uint32s). We pool by size bucket.
+  const uniformPool = { free: [], size: 32 };  // all uniforms fit in 32 bytes
+
   function uniformBuf(uint32Values) {
     const data = new Uint32Array(uint32Values);
-    const size = Math.max(data.byteLength, 16);
-    const buf = device.createBuffer({
-      size,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true,
-    });
-    new Uint32Array(buf.getMappedRange()).set(data);
-    buf.unmap();
+    let buf;
+    if (uniformPool.free.length > 0) {
+      buf = uniformPool.free.pop();
+    } else {
+      buf = device.createBuffer({
+        size: uniformPool.size,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+    }
+    device.queue.writeBuffer(buf, 0, data);
+    stepUniforms.push(buf);
     return buf;
   }
+
+  function recycleUniforms(bufs) {
+    for (const b of bufs) uniformPool.free.push(b);
+  }
+
+  // Track uniform buffers created per step so we can recycle after flush
+  let stepUniforms = [];
 
   function f2u(f) {
     const a = new Float32Array([f]);
@@ -94,6 +108,14 @@ export async function initWebGPU() {
       device.queue.submit([currentEncoder.finish()]);
       currentEncoder = null;
     }
+  }
+
+  // Recycle all pooled buffers (call at start of each training step)
+  function recycleAll() {
+    recycleUniforms(stepUniforms);
+    stepUniforms = [];
+    recycleIdsBuffers(stepIds);
+    stepIds = [];
   }
 
   function dispatch(pipeline, buffers, wgX, wgY = 1, wgZ = 1) {
@@ -256,6 +278,28 @@ struct P { rows: u32, srcCols: u32, dstCols: u32, srcOff: u32 }
   dst[r * p.dstCols + c] = src[r * p.srcCols + p.srcOff + c];
 }`;
 
+  const causalMaskWGSL = `
+struct P { size: u32, _p: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> src: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(256) fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let idx = gid.x; if (idx >= p.size * p.size) { return; }
+  let r = idx / p.size; let c = idx % p.size;
+  if (c > r) { dst[idx] = -3.402823e+38; } else { dst[idx] = src[idx]; }
+}`;
+
+  const causalMaskBackwardWGSL = `
+struct P { size: u32, _p: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> src: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(256) fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let idx = gid.x; if (idx >= p.size * p.size) { return; }
+  let r = idx / p.size; let c = idx % p.size;
+  if (c > r) { dst[idx] = 0.0; } else { dst[idx] = src[idx]; }
+}`;
+
   const crossEntropyWGSL = `
 struct P { rows: u32, cols: u32 }
 @group(0) @binding(0) var<uniform> p: P;
@@ -376,17 +420,40 @@ struct P { lr: f32, b1: f32, b2: f32, eps: f32, bc1: f32, bc2: f32, cnt: u32, _p
   param[i] -= p.lr * (m[i] / p.bc1) / (sqrt(v[i] / p.bc2) + p.eps);
 }`;
 
-  // Helper: upload Int32Array as Uint32 storage buffer
+  // Ids buffer pool — token id arrays are uploaded frequently
+  const idsPool = new Map();  // size -> [buf, ...]
+  let stepIds = [];
+
   function uploadIds(ids) {
-    const buf = device.createBuffer({ size: ids.length * 4, usage: STORAGE, mappedAtCreation: true });
-    const u = new Uint32Array(buf.getMappedRange());
-    if (ids instanceof Int32Array) {
-      for (let i = 0; i < ids.length; i++) u[i] = ids[i] >>> 0;
+    const size = ids.length * 4;
+    let pool = idsPool.get(size);
+    let buf;
+    if (pool && pool.length > 0) {
+      buf = pool.pop();
     } else {
-      u.set(ids);
+      buf = device.createBuffer({
+        size: Math.max(size, 4),
+        usage: STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      if (!pool) idsPool.set(size, []);
     }
-    buf.unmap();
+    const data = new Uint32Array(ids.length);
+    if (ids instanceof Int32Array) {
+      for (let i = 0; i < ids.length; i++) data[i] = ids[i] >>> 0;
+    } else {
+      data.set(ids);
+    }
+    device.queue.writeBuffer(buf, 0, data);
+    stepIds.push({ buf, size });
     return buf;
+  }
+
+  function recycleIdsBuffers(bufs) {
+    for (const { buf, size } of bufs) {
+      let pool = idsPool.get(size);
+      if (!pool) { pool = []; idsPool.set(size, pool); }
+      pool.push(buf);
+    }
   }
 
   // ===== Backend interface =====
@@ -400,6 +467,7 @@ struct P { lr: f32, b1: f32, b2: f32, eps: f32, bc1: f32, bc2: f32, cnt: u32, _p
     fromArray(arr) { return createGPUBuffer(arr instanceof Float32Array ? arr : new Float32Array(arr)); },
 
     flush() { flush(); },
+    recycleBuffers() { recycleAll(); },
 
     async toArray(handle, size) {
       // Flush all pending work before readback
@@ -506,6 +574,22 @@ struct P { s: f32, _p: u32 }
       const u = uniformBuf([rows, cols]);
       const out = emptyBuf(rows * cols);
       dispatch(pl, [u, x, out], wg(rows));
+      return out;
+    },
+
+    causalMask(x, size) {
+      const pl = getOrCreatePipeline('causalMask', causalMaskWGSL);
+      const u = uniformBuf([size, 0]);
+      const out = emptyBuf(size * size);
+      dispatch(pl, [u, x, out], wg(size * size));
+      return out;
+    },
+
+    causalMaskBackward(dOut, size) {
+      const pl = getOrCreatePipeline('causalMaskBwd', causalMaskBackwardWGSL);
+      const u = uniformBuf([size, 0]);
+      const out = emptyBuf(size * size);
+      dispatch(pl, [u, dOut, out], wg(size * size));
       return out;
     },
 

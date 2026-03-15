@@ -124,6 +124,28 @@ export function initCPU() {
       return out;
     },
 
+    // Causal mask: set positions where col > row to -Infinity
+    // x is [rows, cols] where rows = seqLen, cols = seqLen
+    causalMask(x, size) {
+      const out = new Float32Array(x);
+      for (let r = 0; r < size; r++) {
+        for (let c = r + 1; c < size; c++) {
+          out[r * size + c] = -Infinity;
+        }
+      }
+      return out;
+    },
+
+    causalMaskBackward(dOut, size) {
+      const dx = new Float32Array(dOut);
+      for (let r = 0; r < size; r++) {
+        for (let c = r + 1; c < size; c++) {
+          dx[r * size + c] = 0;
+        }
+      }
+      return dx;
+    },
+
     // Fused cross-entropy: softmax + -log(p[target]), returns mean scalar + saved softmax
     // Returns { lossHandle: Float32Array(1), softmaxOut: Float32Array }
     crossEntropyLoss(logits, targets, rows, cols) {
