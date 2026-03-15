@@ -368,10 +368,10 @@
     padding: 0.7rem 1rem;
     background: var(--bg-panel);
     border-bottom: 1px solid var(--border);
-    font-size: 0.65rem;
+    font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.12em;
-    color: var(--text-dim);
+    color: var(--text-bright);
   }
 
   .samples-grid {
@@ -391,7 +391,7 @@
 
   .sample-idx {
     font-size: 0.65rem;
-    color: var(--text-dim);
+    color: var(--accent-mid);
     min-width: 1.6rem;
   }
 
@@ -1049,10 +1049,10 @@ function showSamples(samples, step) {
   if (empty) empty.remove();
 
   const block = document.createElement('div');
-  block.style.borderBottom = '1px solid var(--border)';
+  block.style.cssText = 'border-top:2px solid var(--accent);margin-bottom:0;';
 
   const header = document.createElement('div');
-  header.style.cssText = 'padding:0.5rem 1rem;font-size:0.6rem;text-transform:uppercase;letter-spacing:0.1em;color:var(--text-dim);background:var(--bg);border-bottom:1px solid #111116;';
+  header.style.cssText = 'padding:0.5rem 1rem;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.1em;color:var(--accent);background:var(--bg);border-bottom:1px solid var(--border);font-weight:500;';
   header.textContent = step != null ? `step ${step}` : 'final';
   block.appendChild(header);
 
