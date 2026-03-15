@@ -4,18 +4,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 FROM nginx:alpine
-
-# Minimal config: serve static files on port 7011 with correct MIME types
-RUN printf 'server {\n\
-    listen 7011;\n\
-    root /usr/share/nginx/html;\n\
-    include /etc/nginx/mime.types;\n\
-    types { text/javascript mjs; application/wasm wasm; application/octet-stream bin; }\n\
-    location / { try_files $uri $uri/ =404; }\n\
-}\n' > /etc/nginx/conf.d/default.conf
-
 COPY --from=deps /app/node_modules /usr/share/nginx/html/node_modules
 COPY . /usr/share/nginx/html/
-
+RUN sed -i 's/listen\s*80;/listen 7011;/g' /etc/nginx/conf.d/default.conf
 EXPOSE 7011
 CMD ["nginx", "-g", "daemon off;"]
