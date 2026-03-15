@@ -3,3 +3,4 @@ jax-js
 node_modules
 nanochat
 *.py
+output*log
