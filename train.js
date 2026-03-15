@@ -1,41 +1,13 @@
-// quectoGPT training — GPT model definition + training loop
-// Works with both CPU and WebGPU backends
+// quectoGPT training — training loop with jax-js
 // Node: node train.js [--backend=cpu|webgpu] [--steps=200] [--model=medium]
-// Deno: deno run --allow-read --unstable-webgpu train.js --backend=webgpu --model=medium
+// Deno: deno run --allow-read --allow-net --unstable-webgpu train.js --backend=webgpu --model=medium
 // Browser: imported by index.html
 
-import { Tensor, backward, zeroGrad, clearTape, ops, Adam } from './quectrograd/index.js';
-import { initCPU } from './quectrograd/backend_cpu.js';
+import { init, defaultDevice, numpy as np, valueAndGrad, random, tree, blockUntilReady } from '@jax-js/jax';
+import { adam, applyUpdates } from '@jax-js/optax';
+import { MODEL_CONFIGS, resolveConfig, initParams, loss, inference } from './gpt.js';
 
-// --- Model configs ---
-export const MODEL_CONFIGS = {
-  nano:   { nLayer: 1, nEmbd: 16,  blockSize: 16,  nHead: 4, lr: 0.01,  initStd: 0.08, steps: 100 },
-  tiny:   { nLayer: 2, nEmbd: 64,  blockSize: 32,  nHead: 4, lr: 3e-3,  initStd: 0.04, steps: 200 },
-  small:  { nLayer: 4, nEmbd: 128, blockSize: 64,  nHead: 4, lr: 1e-3,  initStd: 0.02, steps: 200 },
-  medium: { nLayer: 6, nEmbd: 256, blockSize: 128, nHead: 8, lr: 3e-4,  initStd: 0.02, steps: 300 },
-  large:  { nLayer: 8, nEmbd: 512, blockSize: 256, nHead: 8, lr: 1e-4,  initStd: 0.01, steps: 500 },
-};
-
-function resolveConfig(name) {
-  const cfg = MODEL_CONFIGS[name];
-  if (!cfg) throw new Error(`Unknown model config: ${name}. Choose from: ${Object.keys(MODEL_CONFIGS).join(', ')}`);
-  return { ...cfg, headDim: cfg.nEmbd / cfg.nHead };
-}
-
-// --- Seeded RNG (for reproducibility) ---
-function mulberry32(seed) {
-  return function () {
-    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
-    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
-    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  };
-}
-
-function seededGauss(rng, std = 0.08) {
-  const u1 = rng(), u2 = rng();
-  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2) * std;
-}
+export { MODEL_CONFIGS };
 
 // --- Tokenizer ---
 export function buildTokenizer(docs) {
@@ -47,282 +19,95 @@ export function buildTokenizer(docs) {
   return { uchars, BOS, vocabSize, encode, decode };
 }
 
-// --- Parameter initialization ---
-function initParams(vocabSize, cfg, backend, rng) {
-  const matrix = (rows, cols, std = cfg.initStd) => {
-    const data = new Float32Array(rows * cols);
-    for (let i = 0; i < data.length; i++) data[i] = seededGauss(rng, std);
-    return Tensor.from(data, [rows, cols], backend, { requiresGrad: true });
+// --- Seeded RNG (for doc shuffling — JS side) ---
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
-
-  const stateDict = {
-    wte: matrix(vocabSize, cfg.nEmbd),
-    wpe: matrix(cfg.blockSize, cfg.nEmbd),
-    lm_head: matrix(vocabSize, cfg.nEmbd),
-  };
-
-  for (let i = 0; i < cfg.nLayer; i++) {
-    stateDict[`layer${i}.attn_wq`] = matrix(cfg.nEmbd, cfg.nEmbd);
-    stateDict[`layer${i}.attn_wk`] = matrix(cfg.nEmbd, cfg.nEmbd);
-    stateDict[`layer${i}.attn_wv`] = matrix(cfg.nEmbd, cfg.nEmbd);
-    stateDict[`layer${i}.attn_wo`] = matrix(cfg.nEmbd, cfg.nEmbd);
-    stateDict[`layer${i}.mlp_fc1`] = matrix(4 * cfg.nEmbd, cfg.nEmbd);
-    stateDict[`layer${i}.mlp_fc2`] = matrix(cfg.nEmbd, 4 * cfg.nEmbd);
-  }
-
-  return stateDict;
 }
 
-function getAllParams(stateDict) {
-  return Object.values(stateDict);
+// --- LR schedule: warmup -> constant -> linear decay ---
+function lrMultiplier(step, totalSteps) {
+  const warmup = Math.min(10, Math.floor(totalSteps * 0.1));
+  const decayStart = Math.floor(totalSteps * 0.6);
+  if (step < warmup) return (step + 1) / warmup;
+  if (step < decayStart) return 1.0;
+  return (totalSteps - step) / (totalSteps - decayStart);
 }
 
-// --- Batched GPT forward for training ---
-// Processes entire sequence at once: [n, embd] tensors through all layers.
-// Uses causal mask for attention instead of sequential KV cache.
-function gptForward(tokens, stateDict, cfg, backend) {
-  const seqLen = tokens.length - 1;
-  const n = Math.min(cfg.blockSize, seqLen);
-
-  const inputIds = new Int32Array(n);
-  const posIds = new Int32Array(n);
-  const targetIds = new Int32Array(n);
-  for (let i = 0; i < n; i++) {
-    inputIds[i] = tokens[i];
-    posIds[i] = i;
-    targetIds[i] = tokens[i + 1];
-  }
-
-  // Token + position embeddings: [n, embd]
-  let x = ops.embedding(stateDict.wte, inputIds);
-  const posEmb = ops.embedding(stateDict.wpe, posIds);
-  x = ops.add(x, posEmb);
-  x = ops.rmsnorm(x);
-
-  for (let li = 0; li < cfg.nLayer; li++) {
-    const xResidual = x;
-    x = ops.rmsnorm(x);
-
-    // QKV for full sequence: [n, embd]
-    const q = ops.matmulWT(x, stateDict[`layer${li}.attn_wq`]);
-    const k = ops.matmulWT(x, stateDict[`layer${li}.attn_wk`]);
-    const v = ops.matmulWT(x, stateDict[`layer${li}.attn_wv`]);
-
-    // Multi-head attention (batched per head)
-    const headOuts = [];
-    for (let h = 0; h < cfg.nHead; h++) {
-      const hs = h * cfg.headDim;
-      const qH = ops.sliceCols(q, hs, cfg.headDim);  // [n, headDim]
-      const kH = ops.sliceCols(k, hs, cfg.headDim);  // [n, headDim]
-      const vH = ops.sliceCols(v, hs, cfg.headDim);  // [n, headDim]
-
-      // scores = Q @ K^T / sqrt(headDim) -> [n, n]
-      const kT = ops.transpose2D(kH);                 // [headDim, n]
-      let scores = ops.matmul(qH, kT);                // [n, n]
-      scores = ops.scale(scores, 1.0 / Math.sqrt(cfg.headDim));
-
-      // Causal mask + softmax
-      scores = ops.causalMask(scores);                 // upper tri -> -inf
-      const attnWeights = ops.softmax(scores);         // [n, n]
-
-      // Weighted sum of values
-      const headOut = ops.matmul(attnWeights, vH);     // [n, headDim]
-      headOuts.push(headOut);
-    }
-
-    // Concat heads -> [n, embd]
-    const xAttn = ops.concatCols(headOuts);
-
-    // Output projection + residual
-    x = ops.matmulWT(xAttn, stateDict[`layer${li}.attn_wo`]);
-    x = ops.add(x, xResidual);
-
-    // MLP block
-    const mlpResidual = x;
-    x = ops.rmsnorm(x);
-    x = ops.matmulWT(x, stateDict[`layer${li}.mlp_fc1`]);  // [n, 4*embd]
-    x = ops.relu(x);
-    x = ops.matmulWT(x, stateDict[`layer${li}.mlp_fc2`]);  // [n, embd]
-    x = ops.add(x, mlpResidual);
-  }
-
-  // Logits + loss
-  const logits = ops.matmulWT(x, stateDict.lm_head);  // [n, vocabSize]
-  const loss = ops.crossEntropyLoss(logits, targetIds);
-
-  return { loss, logits, n };
-}
-
-// --- Single-token forward for inference (sequential with KV cache) ---
-function gptForwardToken(tokenId, posId, kvCache, stateDict, cfg, backend) {
-  const tokenIds = new Int32Array([tokenId]);
-  const posIds = new Int32Array([posId]);
-
-  let row = ops.embedding(stateDict.wte, tokenIds);
-  const posEmb = ops.embedding(stateDict.wpe, posIds);
-  row = ops.add(row, posEmb);
-  row = ops.rmsnorm(row);
-
-  for (let li = 0; li < cfg.nLayer; li++) {
-    const rowResidual = row;
-    row = ops.rmsnorm(row);
-
-    const q = ops.matmulWT(row, stateDict[`layer${li}.attn_wq`]);
-    const k = ops.matmulWT(row, stateDict[`layer${li}.attn_wk`]);
-    const v = ops.matmulWT(row, stateDict[`layer${li}.attn_wv`]);
-
-    kvCache[li].keys.push(k);
-    kvCache[li].values.push(v);
-
-    const headOuts = [];
-    for (let h = 0; h < cfg.nHead; h++) {
-      const hs = h * cfg.headDim;
-      const qH = ops.sliceCols(q, hs, cfg.headDim);
-      const numKeys = kvCache[li].keys.length;
-
-      const scoreTerms = [];
-      for (let t = 0; t < numKeys; t++) {
-        const kT = ops.sliceCols(kvCache[li].keys[t], hs, cfg.headDim);
-        const kTrans = ops.transpose2D(kT);
-        const score = ops.matmul(qH, kTrans);
-        scoreTerms.push(ops.scale(score, 1.0 / Math.sqrt(cfg.headDim)));
-      }
-
-      const scoresRow = ops.concatCols(scoreTerms);
-      const attnWeights = ops.softmax(scoresRow);
-
-      const vSlices = kvCache[li].values.map(vv => ops.sliceCols(vv, hs, cfg.headDim));
-      const vStack = ops.stackRows(vSlices);
-      const headOut = ops.matmul(attnWeights, vStack);
-      headOuts.push(headOut);
-    }
-
-    const xAttn = ops.concatCols(headOuts);
-    row = ops.matmulWT(xAttn, stateDict[`layer${li}.attn_wo`]);
-    row = ops.add(row, rowResidual);
-
-    const mlpResidual = row;
-    row = ops.rmsnorm(row);
-    row = ops.matmulWT(row, stateDict[`layer${li}.mlp_fc1`]);
-    row = ops.relu(row);
-    row = ops.matmulWT(row, stateDict[`layer${li}.mlp_fc2`]);
-    row = ops.add(row, mlpResidual);
-  }
-
-  return row;
-}
-
-// --- Inference ---
-export async function inference(stateDict, tokenizer, cfg, backend, opts = {}) {
-  const temperature = opts.temperature ?? 0.5;
-  const numSamples = opts.numSamples ?? 20;
-  const rng = opts.rng ?? Math.random;
-  const samples = [];
-
-  for (let s = 0; s < numSamples; s++) {
-    let tokenId = tokenizer.BOS;
-    const generated = [];
-
-    const kvCache = [];
-    for (let li = 0; li < cfg.nLayer; li++) kvCache.push({ keys: [], values: [] });
-
-    for (let pos = 0; pos < cfg.blockSize; pos++) {
-      clearTape();
-
-      const row = gptForwardToken(tokenId, pos, kvCache, stateDict, cfg, backend);
-      const logits = ops.matmulWT(row, stateDict.lm_head);
-
-      const logitsArr = await logits.toArray();
-      if (temperature !== 1.0) {
-        for (let i = 0; i < logitsArr.length; i++) logitsArr[i] /= temperature;
-      }
-      let maxVal = -Infinity;
-      for (let i = 0; i < logitsArr.length; i++) if (logitsArr[i] > maxVal) maxVal = logitsArr[i];
-      const probs = new Float32Array(logitsArr.length);
-      let sum = 0;
-      for (let i = 0; i < logitsArr.length; i++) {
-        probs[i] = Math.exp(logitsArr[i] - maxVal);
-        sum += probs[i];
-      }
-      for (let i = 0; i < probs.length; i++) probs[i] /= sum;
-
-      const r = rng();
-      let cumul = 0;
-      let chosen = probs.length - 1;
-      for (let i = 0; i < probs.length; i++) {
-        cumul += probs[i];
-        if (r < cumul) { chosen = i; break; }
-      }
-
-      if (chosen === tokenizer.BOS) break;
-      generated.push(tokenizer.uchars[chosen]);
-      tokenId = chosen;
-    }
-
-    samples.push(generated.join(''));
-  }
-
-  return samples;
-}
-
-// --- Training generator (used by both Node CLI and browser) ---
-export async function* train(backend, docs, opts = {}) {
+// --- Training generator ---
+export async function* train(backendName, docs, opts = {}) {
   const modelName = opts.model ?? 'nano';
   const cfg = resolveConfig(modelName);
   const numSteps = opts.steps ?? cfg.steps;
-  const learningRate = opts.lr ?? cfg.lr;
+  const baseLR = opts.lr ?? cfg.lr;
   const seed = opts.seed ?? 42;
-  const rng = mulberry32(seed);
+  const jsRng = mulberry32(seed);
 
+  // Shuffle docs
   const shuffledDocs = [...docs];
   for (let i = shuffledDocs.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
+    const j = Math.floor(jsRng() * (i + 1));
     [shuffledDocs[i], shuffledDocs[j]] = [shuffledDocs[j], shuffledDocs[i]];
   }
 
   const tokenizer = buildTokenizer(shuffledDocs);
-  const stateDict = initParams(tokenizer.vocabSize, cfg, backend, rng);
-  const params = getAllParams(stateDict);
-  const paramCount = params.reduce((s, p) => s + p.numel(), 0);
 
-  const optimizer = new Adam(params, {
-    lr: learningRate,
-    beta1: 0.85,
-    beta2: 0.99,
-    eps: 1e-8,
-  });
+  // Init jax-js params
+  const rngKey = random.key(seed);
+  let params = initParams(tokenizer.vocabSize, cfg, rngKey);
 
-  yield { type: 'init', vocabSize: tokenizer.vocabSize, paramCount, backend: backend.name, model: modelName, cfg };
+  // Count params
+  const paramLeaves = tree.leaves(params);
+  const paramCount = paramLeaves.reduce((s, p) => s + p.size, 0);
+
+  // Optimizer — use schedule for LR
+  const lrSchedule = (count) => baseLR * lrMultiplier(count, numSteps);
+  const solver = adam(lrSchedule, { b1: 0.85, b2: 0.99 });
+  let optState = solver.init(tree.ref(params));
+
+  yield { type: 'init', vocabSize: tokenizer.vocabSize, paramCount, backend: backendName, model: modelName, cfg };
 
   for (let step = 0; step < numSteps; step++) {
-    if (backend.recycleBuffers) backend.recycleBuffers();
-    clearTape();
-    zeroGrad(params);
-
     const doc = shuffledDocs[step % shuffledDocs.length];
     const tokens = tokenizer.encode(doc);
-    const { loss, n } = gptForward(tokens, stateDict, cfg, backend);
+    const n = Math.min(cfg.blockSize, tokens.length - 1);
 
-    backward(loss);
+    const inputIds = np.array(new Int32Array(tokens.slice(0, n)), { dtype: np.int32 });
+    const posIds = np.arange(n, { dtype: np.int32 });
+    const targetIds = np.array(new Int32Array(tokens.slice(1, n + 1)), { dtype: np.int32 });
 
-    const lrT = learningRate * (1 - step / numSteps);
-    optimizer.step(lrT);
+    // Forward + backward
+    const lossFn = (p) => loss(p, cfg, inputIds, posIds, targetIds, tokenizer.vocabSize);
+    const [lossVal, grads] = valueAndGrad(lossFn)(params);
 
-    const lossVal = (await loss.toArray())[0];
-    yield { type: 'step', step: step + 1, loss: lossVal, n, totalSteps: numSteps };
+    // Optimizer step
+    const [updates, newOptState] = solver.update(grads, optState, tree.ref(params));
+    const newParams = applyUpdates(params, updates);
+    tree.dispose(optState);
+    params = newParams;
+    optState = newOptState;
+
+    // Read loss
+    const lossScalar = lossVal.item();
+
+    yield { type: 'step', step: step + 1, loss: lossScalar, n, totalSteps: numSteps };
   }
 
-  clearTape();
-  const samples = await inference(stateDict, tokenizer, cfg, backend, {
+  // Inference
+  const inferKey = random.key(seed + 1);
+  const samples = await inference(params, cfg, tokenizer, inferKey, {
     temperature: 0.5,
     numSamples: 20,
-    rng,
   });
 
-  yield { type: 'done', samples, tokenizer, stateDict };
+  yield { type: 'done', samples, tokenizer };
 }
 
-// --- CLI entry point (Node + Deno) ---
+// --- CLI entry point ---
 async function main() {
   const isDeno = typeof Deno !== 'undefined';
   const args = isDeno ? Deno.args : process.argv.slice(2);
@@ -332,30 +117,32 @@ async function main() {
   };
 
   const modelName = getArg('model', 'nano');
-  const backendName = getArg('backend', 'cpu');
+  const backendArg = getArg('backend', 'cpu');
   const steps = getArg('steps', null);
 
-  let backend;
-  if (backendName === 'webgpu') {
-    const { initWebGPU } = await import('./quectrograd/backend_webgpu.js');
-    backend = await initWebGPU();
-  } else {
-    backend = initCPU();
+  // Initialize jax-js
+  const devices = await init();
+  const device = backendArg === 'webgpu' ? 'webgpu' : 'wasm';
+  if (!devices.includes(device)) {
+    console.error(`Backend "${device}" not available. Available: ${devices.join(', ')}`);
+    if (typeof Deno !== 'undefined') Deno.exit(1); else process.exit(1);
   }
+  defaultDevice(device);
 
   const text = isDeno
     ? Deno.readTextFileSync('input.txt')
     : (await import('fs')).readFileSync('input.txt', 'utf-8');
   const docs = text.split('\n').filter(l => l.trim());
 
+  const backendDisplay = device === 'wasm' ? 'cpu (wasm)' : device;
   console.log(`model: ${modelName}`);
   console.log(`num docs: ${docs.length}`);
-  console.log(`backend: ${backend.name}`);
+  console.log(`backend: ${backendDisplay}`);
 
   const trainOpts = { model: modelName };
   if (steps) trainOpts.steps = parseInt(steps);
 
-  const gen = train(backend, docs, trainOpts);
+  const gen = train(device, docs, trainOpts);
 
   const write = isDeno
     ? (s) => Deno.stdout.writeSync(new TextEncoder().encode(s))
@@ -374,7 +161,7 @@ async function main() {
   }
 }
 
-// Run if executed directly (not when imported as a module)
+// Run if executed directly
 if (typeof Deno !== 'undefined') {
   if (import.meta.main) main().catch(console.error);
 } else if (typeof process !== 'undefined' && process.versions?.node) {

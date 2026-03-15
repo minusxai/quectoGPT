@@ -1,8 +1,7 @@
-// quectoGPT benchmark + correctness tests
+// quectoGPT benchmark + correctness tests using jax-js
 // node bench.js [--cpu] [--gpu] [--all]
 
-import { Tensor, backward, zeroGrad, clearTape, ops } from './quectrograd/index.js';
-import { initCPU } from './quectrograd/backend_cpu.js';
+import { init, defaultDevice, numpy as np, nn, grad, random, tree } from '@jax-js/jax';
 
 // --- Utilities ---
 function maxAbsError(a, b) {
@@ -20,12 +19,12 @@ function relError(a, b) {
   return maxRel;
 }
 
-function timeIt(fn, warmup = 10, runs = 100) {
-  for (let i = 0; i < warmup; i++) fn();
+async function timeIt(fn, warmup = 10, runs = 100) {
+  for (let i = 0; i < warmup; i++) await fn();
   const times = [];
   for (let i = 0; i < runs; i++) {
     const t0 = performance.now();
-    fn();
+    await fn();
     times.push(performance.now() - t0);
   }
   return times.reduce((a, b) => a + b) / times.length;
@@ -35,69 +34,63 @@ function pass(name) { console.log(`  ✓ ${name}`); }
 function fail(name, detail) { console.log(`  ✗ ${name}: ${detail}`); }
 
 // --- Gradient checking via finite differences ---
-async function finiteDiffCheck(opFn, inputShapes, backend, eps = 1e-4) {
-  const inputs = inputShapes.map(shape => {
-    const size = shape.reduce((a, b) => a * b, 1);
-    const data = new Float32Array(size);
-    for (let i = 0; i < size; i++) data[i] = (Math.random() - 0.5) * 2;
-    return Tensor.from(data, shape, backend, { requiresGrad: true });
+async function finiteDiffCheck(opFn, inputShapes, eps = 1e-4) {
+  const rngKey = random.key(123);
+  const keys = random.split(rngKey, inputShapes.length);
+
+  const inputs = inputShapes.map((shape, idx) => {
+    const k = keys.slice([idx, 0], [idx + 1, 2]).reshape([2]);
+    return random.uniform(k, shape, { minval: -1, maxval: 1 });
   });
 
-  // Forward + backward with autograd
-  clearTape();
-  zeroGrad(inputs);
-  const out = opFn(...inputs);
-  const sumOut = ops.scale(out, 1.0); // identity to get on tape
-  backward(sumOut);
-
+  // Analytic gradient via grad()
+  const sumFn = (...args) => np.sum(opFn(...args));
   const results = [];
-  for (let inputIdx = 0; inputIdx < inputs.length; inputIdx++) {
-    const input = inputs[inputIdx];
-    const analyticGrad = input.grad ? await input.grad.toArray() : new Float32Array(input.numel());
-    const numericGrad = new Float32Array(input.numel());
-    const inputData = await input.toArray();
 
-    for (let i = 0; i < input.numel(); i++) {
+  for (let inputIdx = 0; inputIdx < inputs.length; inputIdx++) {
+    const gradFn = grad(sumFn, { argnums: inputIdx });
+    const analyticGrad = gradFn(...inputs.map(x => x.ref));
+    const analyticArr = analyticGrad.dataSync();
+
+    // Numeric gradient via finite differences
+    const inputData = inputs[inputIdx].dataSync();
+    const shape = inputs[inputIdx].shape;
+    const numericGrad = new Float32Array(inputData.length);
+
+    for (let i = 0; i < inputData.length; i++) {
       const plusData = new Float32Array(inputData);
       plusData[i] += eps;
       const plusInputs = inputs.map((inp, idx) =>
-        idx === inputIdx ? Tensor.from(plusData, inp.shape, backend, { requiresGrad: true }) : inp
+        idx === inputIdx ? np.array(plusData).reshape(shape) : inp.ref
       );
-      clearTape();
-      const plusOut = opFn(...plusInputs);
-      const plusArr = await plusOut.toArray();
-      let plusSum = 0;
-      for (let j = 0; j < plusArr.length; j++) plusSum += plusArr[j];
+      const plusVal = np.sum(opFn(...plusInputs)).item();
 
       const minusData = new Float32Array(inputData);
       minusData[i] -= eps;
       const minusInputs = inputs.map((inp, idx) =>
-        idx === inputIdx ? Tensor.from(minusData, inp.shape, backend, { requiresGrad: true }) : inp
+        idx === inputIdx ? np.array(minusData).reshape(shape) : inp.ref
       );
-      clearTape();
-      const minusOut = opFn(...minusInputs);
-      const minusArr = await minusOut.toArray();
-      let minusSum = 0;
-      for (let j = 0; j < minusArr.length; j++) minusSum += minusArr[j];
+      const minusVal = np.sum(opFn(...minusInputs)).item();
 
-      numericGrad[i] = (plusSum - minusSum) / (2 * eps);
+      numericGrad[i] = (plusVal - minusVal) / (2 * eps);
     }
 
-    results.push({ inputIdx, err: relError(analyticGrad, numericGrad) });
+    results.push({ inputIdx, err: relError(analyticArr, numericGrad) });
   }
+
+  tree.dispose(inputs);
   return results;
 }
 
 // --- Correctness Tests ---
-async function runCorrectnessTests(backend) {
+async function runCorrectnessTests() {
   console.log('\n=== Correctness Tests ===\n');
 
   {
-    const a = Tensor.from(new Float32Array([1,2,3,4,5,6]), [2, 3], backend);
-    const b = Tensor.from(new Float32Array([7,8,9,10,11,12]), [3, 2], backend);
-    clearTape();
-    const c = ops.matmul(a, b);
-    const result = await c.toArray();
+    const a = np.array([[1,2,3],[4,5,6]]);
+    const b = np.array([[7,8],[9,10],[11,12]]);
+    const c = np.matmul(a, b);
+    const result = c.dataSync();
     const expected = new Float32Array([58, 64, 139, 154]);
     const err = maxAbsError(result, expected);
     if (err < 1e-5) pass(`matmul forward (err=${err.toExponential(2)})`);
@@ -105,11 +98,10 @@ async function runCorrectnessTests(backend) {
   }
 
   {
-    const x = Tensor.from(new Float32Array([1, 2]), [1, 2], backend);
-    const w = Tensor.from(new Float32Array([3, 4, 5, 6, 7, 8]), [3, 2], backend);
-    clearTape();
-    const out = ops.matmulWT(x, w);
-    const result = await out.toArray();
+    const x = np.array([[1, 2]]);
+    const w = np.array([[3, 4], [5, 6], [7, 8]]);
+    const out = np.matmul(x, np.transpose(w));
+    const result = out.dataSync();
     const expected = new Float32Array([11, 17, 23]);
     const err = maxAbsError(result, expected);
     if (err < 1e-5) pass(`matmulWT forward (err=${err.toExponential(2)})`);
@@ -117,11 +109,10 @@ async function runCorrectnessTests(backend) {
   }
 
   {
-    const a = Tensor.from(new Float32Array([1, 2, 3]), [1, 3], backend);
-    const b = Tensor.from(new Float32Array([4, 5, 6]), [1, 3], backend);
-    clearTape();
-    const c = ops.add(a, b);
-    const result = await c.toArray();
+    const a = np.array([[1, 2, 3]]);
+    const b = np.array([[4, 5, 6]]);
+    const c = a.add(b);
+    const result = c.dataSync();
     const expected = new Float32Array([5, 7, 9]);
     const err = maxAbsError(result, expected);
     if (err < 1e-5) pass(`add forward (err=${err.toExponential(2)})`);
@@ -129,10 +120,9 @@ async function runCorrectnessTests(backend) {
   }
 
   {
-    const x = Tensor.from(new Float32Array([-2, -1, 0, 1, 2]), [1, 5], backend);
-    clearTape();
-    const y = ops.relu(x);
-    const result = await y.toArray();
+    const x = np.array([[-2, -1, 0, 1, 2]]);
+    const y = nn.relu(x);
+    const result = y.dataSync();
     const expected = new Float32Array([0, 0, 0, 1, 2]);
     const err = maxAbsError(result, expected);
     if (err < 1e-5) pass(`relu forward (err=${err.toExponential(2)})`);
@@ -140,10 +130,9 @@ async function runCorrectnessTests(backend) {
   }
 
   {
-    const x = Tensor.from(new Float32Array([1, 2, 3, 1, 2, 3]), [2, 3], backend);
-    clearTape();
-    const y = ops.softmax(x);
-    const result = await y.toArray();
+    const x = np.array([[1, 2, 3], [1, 2, 3]]);
+    const y = nn.softmax(x, -1);
+    const result = y.dataSync();
     const sum0 = result[0] + result[1] + result[2];
     const sum1 = result[3] + result[4] + result[5];
     if (Math.abs(sum0 - 1) < 1e-5 && Math.abs(sum1 - 1) < 1e-5) pass('softmax forward (rows sum to 1)');
@@ -151,12 +140,13 @@ async function runCorrectnessTests(backend) {
   }
 
   {
-    const x = Tensor.from(new Float32Array([3, 4]), [1, 2], backend);
-    clearTape();
-    const y = ops.rmsnorm(x);
-    const result = await y.toArray();
+    const x = np.array([[3, 4]]);
     const ms = (9 + 16) / 2;
     const sc = 1.0 / Math.sqrt(ms + 1e-5);
+    const xRef = x.ref;
+    const msArr = np.mean(np.square(xRef), -1, { keepdims: true });
+    const y = x.div(np.sqrt(msArr.add(1e-5)));
+    const result = y.dataSync();
     const expected = new Float32Array([3 * sc, 4 * sc]);
     const err = maxAbsError(result, expected);
     if (err < 1e-5) pass(`rmsnorm forward (err=${err.toExponential(2)})`);
@@ -164,68 +154,69 @@ async function runCorrectnessTests(backend) {
   }
 
   {
-    const table = Tensor.from(new Float32Array([10, 20, 30, 40, 50, 60]), [3, 2], backend);
-    const ids = new Int32Array([2, 0, 1]);
-    clearTape();
-    const y = ops.embedding(table, ids);
-    const result = await y.toArray();
+    const table = np.array([[10, 20], [30, 40], [50, 60]]);
+    const ids = np.array(new Int32Array([2, 0, 1]), { dtype: np.int32 });
+    const y = np.take(table, ids, 0);
+    const result = y.dataSync();
     const expected = new Float32Array([50, 60, 10, 20, 30, 40]);
     const err = maxAbsError(result, expected);
-    if (err < 1e-5) pass(`embedding forward (err=${err.toExponential(2)})`);
-    else fail(`embedding forward`, `err=${err}`);
+    if (err < 1e-5) pass(`embedding (take) forward (err=${err.toExponential(2)})`);
+    else fail(`embedding (take) forward`, `err=${err}`);
   }
 
   {
-    const logits = Tensor.from(new Float32Array([2, 1, 0.1]), [1, 3], backend, { requiresGrad: true });
-    const targets = new Int32Array([0]);
-    clearTape();
-    const loss = ops.crossEntropyLoss(logits, targets);
-    const lossVal = (await loss.toArray())[0];
+    const logits = np.array([[2.0, 1.0, 0.1]]);
+    const targets = np.array(new Int32Array([0]), { dtype: np.int32 });
+    const logprobs = nn.logSoftmax(logits, -1);
+    const oneHot = nn.oneHot(targets, 3);
+    const lossVal = np.mean(np.sum(logprobs.mul(oneHot), -1)).neg();
+    const lossScalar = lossVal.item();
     const exps = [Math.exp(2), Math.exp(1), Math.exp(0.1)];
     const total = exps[0] + exps[1] + exps[2];
     const expected = -Math.log(exps[0] / total);
-    const err = Math.abs(lossVal - expected);
+    const err = Math.abs(lossScalar - expected);
     if (err < 1e-4) pass(`crossEntropyLoss forward (err=${err.toExponential(2)})`);
-    else fail(`crossEntropyLoss forward`, `got=${lossVal}, expected=${expected}, err=${err}`);
+    else fail(`crossEntropyLoss forward`, `got=${lossScalar}, expected=${expected}, err=${err}`);
   }
 
   {
-    const x = Tensor.from(new Float32Array([1,2,3,4, 5,6,7,8]), [2, 4], backend);
-    clearTape();
-    const s = ops.sliceCols(x, 1, 2);
-    const result = await s.toArray();
+    const a = np.array([[1, 2, 3, 4], [5, 6, 7, 8]]);
+    const s = a.slice([0, 1], [2, 3]);
+    const result = s.dataSync();
     const expected = new Float32Array([2, 3, 6, 7]);
     const err = maxAbsError(result, expected);
-    if (err < 1e-5) pass(`sliceCols forward (err=${err.toExponential(2)})`);
-    else fail(`sliceCols forward`, `err=${err}`);
+    if (err < 1e-5) pass(`slice forward (err=${err.toExponential(2)})`);
+    else fail(`slice forward`, `err=${err}`);
   }
 
   {
-    const a = Tensor.from(new Float32Array([1, 2, 3, 4]), [2, 2], backend);
-    clearTape();
-    const t = ops.transpose2D(a);
-    const result = await t.toArray();
+    const a = np.array([[1, 2], [3, 4]]);
+    const t = np.transpose(a);
+    const result = t.dataSync();
     const expected = new Float32Array([1, 3, 2, 4]);
     const err = maxAbsError(result, expected);
-    if (err < 1e-5) pass(`transpose2D forward (err=${err.toExponential(2)})`);
-    else fail(`transpose2D forward`, `err=${err}`);
+    if (err < 1e-5) pass(`transpose forward (err=${err.toExponential(2)})`);
+    else fail(`transpose forward`, `err=${err}`);
   }
 
   console.log('\n=== Gradient Checks ===\n');
 
   const gradChecks = [
-    { name: 'matmul', fn: (a, b) => ops.matmul(a, b), shapes: [[2, 3], [3, 2]] },
-    { name: 'matmulWT', fn: (x, w) => ops.matmulWT(x, w), shapes: [[2, 3], [4, 3]] },
-    { name: 'add', fn: (a, b) => ops.add(a, b), shapes: [[2, 3], [2, 3]] },
-    { name: 'relu', fn: (a) => ops.relu(a), shapes: [[2, 3]] },
-    { name: 'scale', fn: (a) => ops.scale(a, 0.5), shapes: [[2, 3]] },
-    { name: 'negate', fn: (a) => ops.negate(a), shapes: [[2, 3]] },
-    { name: 'rmsnorm', fn: (a) => ops.rmsnorm(a), shapes: [[2, 4]] },
-    { name: 'softmax', fn: (a) => ops.softmax(a), shapes: [[2, 4]] },
+    { name: 'matmul', fn: (a, b) => np.matmul(a, b), shapes: [[2, 3], [3, 2]] },
+    { name: 'matmulWT', fn: (x, w) => np.matmul(x, np.transpose(w)), shapes: [[2, 3], [4, 3]] },
+    { name: 'add', fn: (a, b) => a.add(b), shapes: [[2, 3], [2, 3]] },
+    { name: 'relu', fn: (a) => nn.relu(a), shapes: [[2, 3]] },
+    { name: 'scale', fn: (a) => a.mul(0.5), shapes: [[2, 3]] },
+    { name: 'negate', fn: (a) => a.neg(), shapes: [[2, 3]] },
+    { name: 'rmsnorm', fn: (a) => {
+      const ms = np.mean(np.square(a.ref), -1, { keepdims: true });
+      return a.div(np.sqrt(ms.add(1e-5)));
+    }, shapes: [[2, 4]] },
+    { name: 'softmax', fn: (a) => nn.softmax(a, -1), shapes: [[2, 4]] },
   ];
 
   for (const { name, fn, shapes } of gradChecks) {
-    const results = await finiteDiffCheck(fn, shapes, backend);
+    const results = await finiteDiffCheck(fn, shapes);
     const maxErr = Math.max(...results.map(r => r.err));
     if (maxErr < 0.05) pass(`${name} gradient (max rel err=${maxErr.toExponential(2)})`);
     else fail(`${name} gradient`, `max rel err=${maxErr.toExponential(2)}`);
@@ -233,46 +224,51 @@ async function runCorrectnessTests(backend) {
 }
 
 // --- Op-level benchmarks ---
-function runBenchmarks(backend) {
-  console.log(`\n=== Op-level Benchmarks (${backend.name}) ===\n`);
+async function runBenchmarks() {
+  const device = defaultDevice();
+  console.log(`\n=== Op-level Benchmarks (${device}) ===\n`);
   console.log('op             | size      | ms');
   console.log('---------------|-----------|-------');
 
   for (const n of [16, 64, 256]) {
-    const a = Tensor.from(new Float32Array(n * n).fill(1), [n, n], backend);
-    const b = Tensor.from(new Float32Array(n * n).fill(1), [n, n], backend);
-    const ms = timeIt(() => { clearTape(); ops.matmul(a, b); });
+    const a = np.ones([n, n]);
+    const b = np.ones([n, n]);
+    const ms = await timeIt(() => { const c = np.matmul(a.ref, b.ref); c.dataSync(); });
     console.log(`matmul         | ${String(n + 'x' + n).padEnd(9)} | ${ms.toFixed(2)}`);
+    a.dispose(); b.dispose();
   }
 
   for (const n of [1000, 10000, 100000]) {
-    const a = Tensor.from(new Float32Array(n).fill(1), [1, n], backend);
-    const b = Tensor.from(new Float32Array(n).fill(1), [1, n], backend);
-    const ms = timeIt(() => { clearTape(); ops.add(a, b); });
+    const a = np.ones([1, n]);
+    const b = np.ones([1, n]);
+    const ms = await timeIt(() => { const c = a.ref.add(b.ref); c.dataSync(); });
     console.log(`add            | ${String(n).padEnd(9)} | ${ms.toFixed(2)}`);
+    a.dispose(); b.dispose();
   }
 
   for (const n of [1000, 10000, 100000]) {
-    const a = Tensor.from(new Float32Array(n).fill(1), [1, n], backend);
-    const ms = timeIt(() => { clearTape(); ops.relu(a); });
+    const a = np.ones([1, n]);
+    const ms = await timeIt(() => { const c = nn.relu(a.ref); c.dataSync(); });
     console.log(`relu           | ${String(n).padEnd(9)} | ${ms.toFixed(2)}`);
+    a.dispose();
   }
 
   for (const n of [16, 64, 256]) {
-    const a = Tensor.from(new Float32Array(n).fill(1), [1, n], backend);
-    const ms = timeIt(() => { clearTape(); ops.softmax(a); });
+    const a = np.ones([1, n]);
+    const ms = await timeIt(() => { const c = nn.softmax(a.ref, -1); c.dataSync(); });
     console.log(`softmax        | ${String(n).padEnd(9)} | ${ms.toFixed(2)}`);
+    a.dispose();
   }
 }
 
 // --- End-to-end training benchmark ---
-async function runTrainingBench(backend, docs, steps = 10) {
-  console.log(`\n=== Training Benchmark (${backend.name}, ${steps} steps) ===\n`);
+async function runTrainingBench(backendName, docs, steps = 10) {
+  console.log(`\n=== Training Benchmark (${backendName}, ${steps} steps) ===\n`);
   const { train } = await import('./train.js');
 
   const t0 = performance.now();
   const losses = [];
-  const gen = train(backend, docs, { steps, model: 'nano' });
+  const gen = train(backendName, docs, { steps, model: 'nano' });
 
   for await (const event of gen) {
     if (event.type === 'step') losses.push(event.loss);
@@ -287,7 +283,7 @@ async function runTrainingBench(backend, docs, steps = 10) {
   return { elapsed, losses };
 }
 
-// --- File reading (works in both Node and Deno) ---
+// --- File reading ---
 async function readTextFile(path) {
   if (typeof Deno !== 'undefined') {
     return Deno.readTextFileSync(path);
@@ -302,32 +298,38 @@ async function main() {
   const runCPU = args.includes('--cpu') || args.includes('--all') || args.length === 0;
   const runGPU = args.includes('--gpu') || args.includes('--all');
 
-  const cpuBackend = initCPU();
-
   if (runCPU) {
-    await runCorrectnessTests(cpuBackend);
-    runBenchmarks(cpuBackend);
+    const devices = await init();
+    defaultDevice('wasm');
+
+    await runCorrectnessTests();
+    await runBenchmarks();
 
     const text = await readTextFile('input.txt');
     const docs = text.split('\n').filter(l => l.trim());
-    await runTrainingBench(cpuBackend, docs, 10);
+    await runTrainingBench('wasm', docs, 10);
   }
 
   if (runGPU) {
     try {
-      const { initWebGPU } = await import('./quectrograd/backend_webgpu.js');
-      const gpuBackend = await initWebGPU();
+      const devices = await init();
+      if (!devices.includes('webgpu')) throw new Error('WebGPU not available');
+      defaultDevice('webgpu');
       console.log('\n=== WebGPU Backend Available ===');
-      await runCorrectnessTests(gpuBackend);
-      runBenchmarks(gpuBackend);
+
+      await runCorrectnessTests();
+      await runBenchmarks();
 
       const text = await readTextFile('input.txt');
       const docs = text.split('\n').filter(l => l.trim());
-      await runTrainingBench(gpuBackend, docs, 10);
+      await runTrainingBench('webgpu', docs, 10);
     } catch (e) {
       console.log(`\nWebGPU not available: ${e.message}`);
     }
   }
 }
+
+// Export for browser use
+export { runCorrectnessTests, runBenchmarks, runTrainingBench, finiteDiffCheck, maxAbsError, relError, timeIt };
 
 main().catch(console.error);
