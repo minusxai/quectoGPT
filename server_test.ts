@@ -1013,6 +1013,115 @@ Deno.test({
   clientB.ws.close();
 });
 
+// ─── Test G: Mid-session joiner downloads current server weights ──────────────
+//
+// This is the core "weight download" test: verifies that a client joining an
+// in-progress session receives the server's CURRENT aggregated weights (not
+// empty/random), so it can resume training from where the group left off.
+//
+// Flow:
+//   1. Two clients complete round 1 → server holds aggregated weights W1
+//   2. A THIRD client joins mid-session
+//   3. Verify the join update contains weights === W1 (exact values, not empty)
+//   4. The new client trains on W1 and publishes a delta based on W1
+//   5. With a 4th client, round 2 completes successfully
+//   6. Final weights verified against expected W1 + token-weighted avg of deltas
+
+Deno.test({
+  name: "mid-session joiner downloads current server weights (not empty/random)",
+  sanitizeOps: false,
+  sanitizeResources: false,
+}, async () => {
+  const initialWeights = [1.0, 2.0, 3.0, 4.0];
+  const res = await fetch(`${BASE}/train`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ weights: initialWeights, quorum: 2, round_duration_ms: 60000 }),
+  });
+  assertEquals(res.status, 201);
+  const { train_id } = await res.json();
+
+  // Two original clients join and complete round 1
+  const [c1, c2] = await Promise.all([joinClient(train_id), joinClient(train_id)]);
+  // Verify both get the initial weights
+  for (const { update } of [c1, c2]) {
+    assertEquals(update.payload.version, 0);
+    assertEquals(update.payload.weights, initialWeights, "initial join must receive server weights exactly");
+  }
+
+  const r1Updates = [c1, c2].map(({ ws }) => waitForMsg(ws, "update") as Promise<UpdateMsg>);
+  for (const [i, { ws }] of [c1, c2].entries()) {
+    const { delta, tokens, loss } = mockTrain(initialWeights, i);
+    ws.send(JSON.stringify({
+      type: "publish",
+      train_id,
+      payload: { publish_id: `mid-r1-c${i}`, base_version: 0, delta, tokens, loss, steps: 10 },
+    }));
+  }
+  const [r1c1] = await Promise.all(r1Updates);
+
+  // Compute expected W1 = initialWeights + token-weighted avg of deltas
+  const W1 = r1c1.payload.weights;
+  assertEquals(W1.length, 4, "W1 must have 4 weights");
+  const expectedW1 = initialWeights.map((w, i) => {
+    let acc = 0;
+    for (let c = 0; c < 2; c++) {
+      const { delta, tokens } = mockTrain(initialWeights, c);
+      acc += tokens * delta[i];
+    }
+    return w + acc / 210;
+  });
+  for (let i = 0; i < 4; i++) {
+    assert(Math.abs(W1[i] - expectedW1[i]) < 1e-10, `W1[${i}]: expected ${expectedW1[i]}, got ${W1[i]}`);
+  }
+
+  // ── Third client joins MID-SESSION ─────────────────────────────────────────
+  const { ws: c3ws, update: c3update } = await joinClient(train_id);
+
+  // THE KEY ASSERTION: late joiner gets W1, not initialWeights and not empty []
+  assertEquals(c3update.payload.version, 1, "late joiner must see current version");
+  assertEquals(c3update.payload.weights.length, 4, "late joiner must receive non-empty weights");
+  for (let i = 0; i < 4; i++) {
+    assert(
+      Math.abs(c3update.payload.weights[i] - W1[i]) < 1e-10,
+      `late joiner w[${i}]: got ${c3update.payload.weights[i]}, expected aggregated W1 ${W1[i]} — NOT the initial ${initialWeights[i]}`,
+    );
+  }
+
+  // Late joiner uses downloaded W1 to compute delta and submits for round 2
+  const r2UpdateC1 = waitForMsg(c1.ws, "update", 5000) as Promise<UpdateMsg>;
+  const r2UpdateC3 = waitForMsg(c3ws, "update", 5000) as Promise<UpdateMsg>;
+
+  for (const [i, ws] of [[0, c1.ws], [2, c3ws]] as [number, WebSocket][]) {
+    const { delta, tokens, loss } = mockTrain(W1, i);
+    ws.send(JSON.stringify({
+      type: "publish",
+      train_id,
+      payload: { publish_id: `mid-r2-c${i}`, base_version: 1, delta, tokens, loss, steps: 10 },
+    }));
+  }
+
+  const [r2] = await Promise.all([r2UpdateC1, r2UpdateC3]);
+  assertEquals(r2.payload.version, 2, "round 2 must advance to version 2");
+
+  // Verify W2 = W1 + token-weighted avg of c0 and c2 deltas
+  const expectedW2 = W1.map((w, i) => {
+    const { delta: d0, tokens: t0 } = mockTrain(W1, 0);
+    const { delta: d2, tokens: t2 } = mockTrain(W1, 2);
+    return w + (t0 * d0[i] + t2 * d2[i]) / (t0 + t2);
+  });
+  for (let i = 0; i < 4; i++) {
+    assert(
+      Math.abs(r2.payload.weights[i] - expectedW2[i]) < 1e-10,
+      `W2[${i}]: expected ${expectedW2[i]}, got ${r2.payload.weights[i]}`,
+    );
+  }
+
+  c1.ws.close();
+  c2.ws.close();
+  c3ws.close();
+});
+
 // ─── Test E: DELETE session broadcasts session_closed ─────────────────────────
 
 Deno.test({ name: "DELETE session broadcasts session_closed and removes session", sanitizeOps: false, sanitizeResources: false }, async () => {
