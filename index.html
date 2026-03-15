@@ -56,9 +56,23 @@
   }
 
   .shell {
-    max-width: 1100px;
+    max-width: 1400px;
     margin: 0 auto;
     padding: 1.5rem 2rem 3rem;
+  }
+
+  .page-layout {
+    display: grid;
+    grid-template-columns: 1fr 260px;
+    gap: 1.5rem;
+    align-items: start;
+  }
+
+  .main-col { min-width: 0; }
+
+  .sidebar-col {
+    position: sticky;
+    top: 1.5rem;
   }
 
   /* --- Header --- */
@@ -426,160 +440,151 @@
     transition: width 0.1s linear;
   }
 
-  /* Lobby */
-  .lobby-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1px;
-    background: var(--border);
+  /* Sidebar */
+  .sidebar-section {
     border: 1px solid var(--border);
     border-radius: 4px;
     overflow: hidden;
-    margin-bottom: 1.5rem;
+    margin-bottom: 1rem;
   }
-  .lobby-card {
-    background: var(--bg-panel);
-    padding: 1.5rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
-  .lobby-card-title {
-    font-size: 0.65rem;
+  .sidebar-section-header {
+    padding: 0.5rem 0.8rem;
+    font-size: 0.6rem;
     text-transform: uppercase;
     letter-spacing: 0.12em;
     color: var(--text-dim);
-    margin-bottom: 0.25rem;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+  }
+  .lobby-card {
+    background: var(--bg-panel);
+    padding: 0.8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .lobby-card + .lobby-card {
+    border-top: 1px solid var(--border);
+  }
+  .lobby-card-title {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    margin-bottom: 0.1rem;
+    font-weight: 500;
   }
   .field-row {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
+    gap: 0.4rem;
     justify-content: space-between;
   }
-  .field-row .input-field { text-align: right; }
+  .field-row .input-field { text-align: right; font-size: 0.72rem; }
+  .field-row .control-label { font-size: 0.6rem; }
 
-  /* Session bar */
-  .session-bar {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    padding: 0.6rem 1rem;
+  /* Session info in sidebar */
+  .session-info {
     background: var(--bg-panel);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    margin-bottom: 0.75rem;
-    flex-wrap: wrap;
+    padding: 0.8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
   }
-  .session-id-wrap { display: flex; align-items: center; gap: 0.4rem; }
+  .session-id-wrap { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
   .sess-id-text {
     font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     color: var(--accent);
     letter-spacing: 0.04em;
   }
   .sess-countdown {
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     color: var(--amber);
     font-variant-numeric: tabular-nums;
+  }
+  .sess-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
   }
 
   /* Submit request banner */
   .submit-banner {
     background: #ffaa2215;
-    border: 1px solid #ffaa2244;
-    border-radius: 4px;
-    padding: 0.6rem 1rem;
-    font-size: 0.78rem;
+    border-top: 1px solid #ffaa2244;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.7rem;
     color: var(--amber);
-    margin-bottom: 0.75rem;
     letter-spacing: 0.04em;
   }
 
-  /* Session body: devices + chart */
-  .session-body {
-    display: grid;
-    grid-template-columns: 200px 1fr;
-    gap: 1px;
-    background: var(--border);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    overflow: hidden;
-    margin-bottom: 1.5rem;
-  }
-  .devices-panel {
-    background: var(--bg-panel);
-    display: flex;
-    flex-direction: column;
-  }
+  /* Devices list in sidebar */
   .devices-header {
     padding: 0.5rem 0.8rem;
     font-size: 0.6rem;
     text-transform: uppercase;
     letter-spacing: 0.12em;
     color: var(--text-dim);
+    border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
+    background: var(--bg);
   }
   .device-item {
-    padding: 0.5rem 0.8rem;
-    border-bottom: 1px solid var(--border);
+    padding: 0.4rem 0.8rem;
+    border-bottom: 1px solid #111116;
     display: flex;
     flex-direction: column;
-    gap: 0.15rem;
+    gap: 0.1rem;
+    background: var(--bg-panel);
   }
   .device-item:last-child { border-bottom: none; }
   .device-id {
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     color: var(--text-bright);
     font-variant-numeric: tabular-nums;
   }
   .device-you {
-    font-size: 0.6rem;
+    font-size: 0.55rem;
     color: var(--accent);
     letter-spacing: 0.06em;
   }
   .device-name {
-    font-size: 0.68rem;
+    font-size: 0.65rem;
     color: var(--text);
   }
   .device-time {
-    font-size: 0.6rem;
+    font-size: 0.55rem;
     color: var(--text-dim);
   }
   .device-empty {
-    padding: 1rem 0.8rem;
-    font-size: 0.72rem;
+    padding: 0.8rem;
+    font-size: 0.68rem;
     color: var(--text-dim);
+    background: var(--bg-panel);
   }
 
-  /* Move chart-section border-radius inside session-body */
-  .session-body .chart-section {
-    border: none;
-    border-radius: 0;
-    margin-bottom: 0;
+  /* Session chart in main area */
+  .session-chart-wrap {
+    margin-bottom: 1.5rem;
   }
-
-  /* Section label above local training */
-  .section-label {
-    font-size: 0.6rem;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: var(--text-dim);
-    margin-bottom: 0.75rem;
-    padding-top: 0.5rem;
-    border-top: 1px solid var(--border);
+  .session-chart-wrap .chart-section {
+    border: 1px solid var(--border);
+    border-radius: 4px;
   }
 
   /* --- Responsive --- */
+  @media (max-width: 900px) {
+    .page-layout { grid-template-columns: 1fr; }
+    .sidebar-col { position: static; }
+  }
   @media (max-width: 700px) {
     .shell { padding: 1rem; }
     .chart-section { grid-template-columns: 1fr; }
     .chart-sidebar { border-top: 1px solid var(--border); flex-direction: row; padding: 1rem; }
     .chart-wrap { height: 240px; border-right: none; }
     .control-group { margin-left: 0; }
-    .lobby-grid { grid-template-columns: 1fr; }
-    .session-body { grid-template-columns: 1fr; }
-    .devices-panel { border-bottom: 1px solid var(--border); }
   }
 </style>
 </head>
@@ -599,67 +604,13 @@
     </div>
   </header>
 
-  <!-- LOBBY: shown when not in a session -->
-  <div id="panel-lobby">
-    <div class="lobby-grid">
-      <div class="lobby-card">
-        <div class="lobby-card-title">New Session</div>
-        <div class="field-row">
-          <label class="control-label">Quorum</label>
-          <input class="input-field" id="new-quorum" type="number" value="2" min="1" style="width:60px">
-        </div>
-        <div class="field-row">
-          <label class="control-label">Round (s)</label>
-          <input class="input-field" id="new-round" type="number" value="15" min="5" style="width:70px">
-        </div>
-        <div class="field-row">
-          <label class="control-label">Grace (s)</label>
-          <input class="input-field" id="new-grace" type="number" value="3" min="1" style="width:70px">
-        </div>
-        <button class="btn primary" id="btn-new-session">Start Session</button>
-      </div>
-      <div class="lobby-card">
-        <div class="lobby-card-title">Join Session</div>
-        <div class="field-row">
-          <label class="control-label">Session ID</label>
-          <input class="input-field" id="join-id" type="text" placeholder="paste id…" style="width:100%">
-        </div>
-        <div class="field-row">
-          <label class="control-label">Device name</label>
-          <input class="input-field" id="join-name" type="text" style="width:100%">
-        </div>
-        <button class="btn primary" id="btn-join-session">Join</button>
-      </div>
-    </div>
-  </div>
+  <div class="page-layout">
+  <div class="main-col">
 
-  <!-- SESSION: shown when connected -->
-  <div id="panel-session" hidden>
-    <!-- Session info bar -->
-    <div class="session-bar">
-      <span class="session-id-wrap">
-        <span class="control-label">Session</span>
-        <code id="sess-id" class="sess-id-text"></code>
-        <button class="btn" id="btn-copy-id" style="padding:0.2rem 0.5rem;font-size:0.65rem">copy</button>
-      </span>
-      <span class="badge" id="sess-version"><span class="dot"></span>v0</span>
-      <span id="sess-round-status" class="control-label">0 / — submitted</span>
-      <span id="sess-countdown" class="sess-countdown"></span>
-      <button class="btn danger" id="btn-leave" style="margin-left:auto">Leave</button>
-    </div>
-
-    <!-- submit_request amber banner -->
-    <div id="banner-submit" hidden class="submit-banner">
-      ⚡ Round ending — submit training results
-    </div>
-
-    <!-- 2-col: devices | chart -->
-    <div class="session-body">
-      <div class="devices-panel" id="devices-panel">
-        <div class="devices-header">Devices</div>
-        <div id="devices-list"><div class="device-empty">No devices connected</div></div>
-      </div>
-      <div class="chart-section" id="session-chart-section">
+  <!-- Session chart (shown when connected) -->
+  <div id="session-chart-area" hidden>
+    <div class="session-chart-wrap">
+      <div class="chart-section">
         <div class="chart-wrap">
           <span class="chart-label" id="sess-chart-label">avg loss / round</span>
           <canvas id="sess-chart"></canvas>
@@ -670,6 +621,9 @@
           <div class="loss-delta" id="sess-loss-delta">&nbsp;</div>
         </div>
       </div>
+    </div>
+    <div id="banner-submit" hidden class="submit-banner">
+      Round ending — submit training results
     </div>
   </div>
 
@@ -768,6 +722,67 @@
     </div>
   </div>
 
+  </div><!-- /main-col -->
+
+  <div class="sidebar-col">
+    <!-- LOBBY: shown when not in a session -->
+    <div id="panel-lobby">
+      <div class="sidebar-section">
+        <div class="sidebar-section-header">Distributed Training</div>
+        <div class="lobby-card">
+          <div class="lobby-card-title">New Session</div>
+          <div class="field-row">
+            <label class="control-label">Quorum</label>
+            <input class="input-field" id="new-quorum" type="number" value="2" min="1" style="width:50px">
+          </div>
+          <div class="field-row">
+            <label class="control-label">Round (s)</label>
+            <input class="input-field" id="new-round" type="number" value="15" min="5" style="width:50px">
+          </div>
+          <div class="field-row">
+            <label class="control-label">Grace (s)</label>
+            <input class="input-field" id="new-grace" type="number" value="3" min="1" style="width:50px">
+          </div>
+          <button class="btn primary" id="btn-new-session" style="width:100%;margin-top:0.25rem">Start Session</button>
+        </div>
+        <div class="lobby-card">
+          <div class="lobby-card-title">Join Session</div>
+          <div class="field-row">
+            <label class="control-label">Session ID</label>
+            <input class="input-field" id="join-id" type="text" placeholder="paste id…" style="width:100%;text-align:left;font-size:0.68rem">
+          </div>
+          <div class="field-row">
+            <label class="control-label">Device name</label>
+            <input class="input-field" id="join-name" type="text" style="width:100%;text-align:left;font-size:0.68rem">
+          </div>
+          <button class="btn primary" id="btn-join-session" style="width:100%;margin-top:0.25rem">Join</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- SESSION: shown when connected -->
+    <div id="panel-session" hidden>
+      <div class="sidebar-section">
+        <div class="sidebar-section-header">Session</div>
+        <div class="session-info">
+          <div class="session-id-wrap">
+            <code id="sess-id" class="sess-id-text"></code>
+            <button class="btn" id="btn-copy-id" style="padding:0.15rem 0.4rem;font-size:0.6rem">copy</button>
+          </div>
+          <div class="sess-meta-row">
+            <span class="badge" id="sess-version" style="font-size:0.6rem;padding:0.15rem 0.4rem"><span class="dot"></span>v0</span>
+            <span id="sess-countdown" class="sess-countdown"></span>
+          </div>
+          <div style="font-size:0.65rem;color:var(--text-dim)" id="sess-round-status">0 / — submitted</div>
+          <button class="btn danger" id="btn-leave" style="width:100%;font-size:0.7rem;padding:0.4rem">Leave</button>
+        </div>
+        <div class="devices-header">Devices</div>
+        <div id="devices-list"><div class="device-empty">No devices connected</div></div>
+      </div>
+    </div>
+  </div><!-- /sidebar-col -->
+
+  </div><!-- /page-layout -->
 </div>
 
 <script type="importmap">
@@ -1194,6 +1209,7 @@ function enterSession(trainId) {
   inSession = true;
   $('panel-lobby').hidden = true;
   $('panel-session').hidden = false;
+  $('session-chart-area').hidden = false;
   $('controls-bar').hidden = true;
   $('sess-id').textContent = trainId;
   roundLossHistory = [];
@@ -1217,6 +1233,7 @@ function leaveSession() {
   abortFlag = true;
   $('panel-lobby').hidden = false;
   $('panel-session').hidden = true;
+  $('session-chart-area').hidden = true;
   $('controls-bar').hidden = false;
   $('banner-submit').hidden = true;
   roundSteps = 0; roundLossSum = 0; roundTokens = 0;

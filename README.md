@@ -1,8 +1,10 @@
 # quectoGPT
 
-The most atomic way to train a GPT — now in JavaScript with WebGPU acceleration.
+**Distributed GPT training in the browser via WebGPU.** Multiple devices train collaboratively — open a tab, join a session, and your GPU contributes gradient updates in real time.
 
-A port of Karpathy's [microgpt.py](https://github.com/karpathy/microgpt) using [jax-js](https://github.com/ekzhang/jax-js) (`@jax-js/jax` + `@jax-js/optax`) — a production-grade ML library with JAX API, WebGPU/Wasm backends, built-in `grad()`, `jit()`, and optimizers.
+An amalgam of Karpathy's [microgpt](https://github.com/karpathy/microgpt) (minimal GPT) and [nanochat](https://github.com/karpathy/nanochat) (BPE tokenizer pipeline), ported to JavaScript with [jax-js](https://github.com/ekzhang/jax-js) for WebGPU/Wasm tensor ops and autodiff.
+
+The entire pipeline — BPE tokenizer training, batched forward/backward, federated weight aggregation — runs in the browser. Zero Python. Any device with a browser can contribute.
 
 ## What this is
 
