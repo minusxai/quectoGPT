@@ -343,11 +343,12 @@ Deno.test({
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
-  // quorum: 5 but only 3 clients will submit — round fires via deadline timer
+  // quorum: 5 but only 3 clients submit — round fires via deadline timer
+  // grace_period_ms: 1000 so submit_request arrives at ~t=1500, round at ~t=2500
   const res = await fetch(`${BASE}/train`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ weights: [0, 0, 0, 0], quorum: 5, round_duration_ms: 2000 }),
+    body: JSON.stringify({ weights: [0, 0, 0, 0], quorum: 5, round_duration_ms: 2500, grace_period_ms: 1000 }),
   });
   const { train_id } = await res.json();
 
@@ -355,9 +356,12 @@ Deno.test({
     Array.from({ length: 3 }, () => joinClient(train_id)),
   );
 
-  // Register update listeners BEFORE publishing
+  // Register submit_request and update listeners BEFORE publishing
+  const submitRequestPromises = clients.map(({ ws }) =>
+    waitForMsg(ws, "submit_request", 6000) as Promise<{ type: string; train_id: string; deadline_ms: number }>
+  );
   const updatePromises = clients.map(({ ws }) =>
-    waitForMsg(ws, "update", 6000) as Promise<UpdateMsg>
+    waitForMsg(ws, "update", 8000) as Promise<UpdateMsg>
   );
 
   for (let i = 0; i < 3; i++) {
@@ -378,7 +382,15 @@ Deno.test({
     );
   }
 
-  // Deadline fires after ~2-3s; wait up to 6s
+  // All 3 clients must receive submit_request before the deadline fires
+  const submitRequests = await Promise.all(submitRequestPromises);
+  for (const sr of submitRequests) {
+    assertEquals(sr.type, "submit_request");
+    assertEquals(sr.train_id, train_id);
+    assert(sr.deadline_ms > Date.now(), "deadline_ms should be in the future when received");
+  }
+
+  // Then all 3 receive update when deadline fires
   const updates = await Promise.all(updatePromises);
   for (const upd of updates) {
     assertEquals(upd.payload.version, 1, "deadline path should advance to version 1");
@@ -503,7 +515,89 @@ Deno.test({ name: "rejection cases", sanitizeOps: false, sanitizeResources: fals
   for (const { ws } of clients) ws.close();
 });
 
-// ─── Test 8: Multiple rounds — weights accumulate correctly ───────────────────
+// ─── Test 8: submit_request timing and late-joiner during grace period ────────
+
+Deno.test({
+  name: "submit_request: timing, payload, and late join during grace period",
+  sanitizeOps: false,
+  sanitizeResources: false,
+}, async () => {
+  // round_duration_ms: 2500, grace_period_ms: 1000
+  // submit_request arrives at ~t=1500, round aggregates at ~t=2500
+  const res = await fetch(`${BASE}/train`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ weights: [0, 0, 0, 0], quorum: 10, round_duration_ms: 2500, grace_period_ms: 1000 }),
+  });
+  const { train_id } = await res.json();
+
+  // Verify GET /train/:id exposes grace_period_ms
+  const status = await (await fetch(`${BASE}/train/${train_id}`)).json();
+  assertEquals(status.grace_period_ms, 1000);
+  assertEquals(status.submit_request_sent, false);
+
+  const clients = await Promise.all(
+    Array.from({ length: 2 }, () => joinClient(train_id)),
+  );
+
+  // Register submit_request listeners on both early clients
+  const srPromises = clients.map(({ ws }) =>
+    waitForMsg(ws, "submit_request", 6000) as Promise<{ deadline_ms: number }>
+  );
+
+  // Wait for grace period to begin, then a 3rd client joins mid-grace-period
+  // It should immediately receive submit_request on join (server sends it in handleJoin)
+  const [sr0] = await Promise.all([srPromises[0]]);  // wait for first to confirm grace started
+
+  const { ws: lateWs, update: lateUpdate } = await joinClient(train_id);
+  assertEquals(lateUpdate.payload.version, 0);
+
+  // Late joiner should get submit_request immediately since grace period is active
+  const lateSr = await waitForMsg(lateWs, "submit_request", 3000) as { deadline_ms: number; train_id: string };
+  assertEquals(lateSr.train_id, train_id);
+  assert(lateSr.deadline_ms > Date.now(), "late joiner's submit_request deadline should be in the future");
+  // deadline_ms matches what early clients saw
+  assertEquals(lateSr.deadline_ms, sr0.deadline_ms);
+
+  // Also confirm GET /train/:id now shows submit_request_sent: true
+  const statusMid = await (await fetch(`${BASE}/train/${train_id}`)).json();
+  assertEquals(statusMid.submit_request_sent, true);
+
+  // Have all clients (including late joiner) submit so the round fires at deadline
+  const updatePromises = [
+    ...clients.map(({ ws }) => waitForMsg(ws, "update", 8000)),
+    waitForMsg(lateWs, "update", 8000),
+  ];
+  for (const [i, { ws }] of [...clients.entries()]) {
+    const { delta, tokens, loss } = mockTrain([0, 0, 0, 0], i);
+    ws.send(JSON.stringify({
+      type: "publish",
+      train_id,
+      payload: { publish_id: `sr-test-c${i}`, base_version: 0, delta, tokens, loss, steps: 10 },
+    }));
+  }
+  // late joiner also submits
+  const { delta, tokens, loss } = mockTrain([0, 0, 0, 0], 2);
+  lateWs.send(JSON.stringify({
+    type: "publish",
+    train_id,
+    payload: { publish_id: "sr-test-late", base_version: 0, delta, tokens, loss, steps: 5 },
+  }));
+
+  const updates = await Promise.all(updatePromises);
+  for (const upd of updates) {
+    assertEquals((upd as UpdateMsg).payload.version, 1);
+  }
+
+  // After round completes, submit_request_sent should be reset
+  const statusAfter = await (await fetch(`${BASE}/train/${train_id}`)).json();
+  assertEquals(statusAfter.submit_request_sent, false);
+
+  for (const { ws } of clients) ws.close();
+  lateWs.close();
+});
+
+// ─── Test 9: Multiple rounds — weights accumulate correctly ──────────────────
 
 Deno.test({ name: "multiple rounds accumulate weights correctly", sanitizeOps: false, sanitizeResources: false }, async () => {
   // quorum: 2, two clients run 3 full rounds

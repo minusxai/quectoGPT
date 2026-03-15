@@ -8,7 +8,9 @@ type TrainSession = {
   weights: number[];
   quorum: number;
   round_duration_ms: number;
+  grace_period_ms: number;
   deadline_ms: number;
+  submit_request_sent: boolean;
   clients: Set<WebSocket>;
   delta_accumulator: number[];
   token_accumulator: number;
@@ -65,6 +67,7 @@ function tryCompleteRound(session: TrainSession) {
   session.loss_sum = 0;
   session.loss_count = 0;
   session.deadline_ms = now + session.round_duration_ms;
+  session.submit_request_sent = false;
 
   const msg = {
     type: "update",
@@ -103,6 +106,11 @@ function handleJoin(ws: WebSocket, train_id: string) {
       deadline_ms: session.deadline_ms,
     },
   });
+
+  // If already in grace period, notify immediately so the client can wrap up
+  if (session.submit_request_sent) {
+    send(ws, { type: "submit_request", train_id, deadline_ms: session.deadline_ms });
+  }
 }
 
 function handlePublish(ws: WebSocket, train_id: string, payload: PublishPayload) {
@@ -145,19 +153,31 @@ function handlePublish(ws: WebSocket, train_id: string, payload: PublishPayload)
   }
 }
 
-// Timer: check deadlines every second
+// Timer: check grace period and deadlines every 250ms for timely submit_request delivery
 setInterval(() => {
   const now = Date.now();
   for (const session of sessions.values()) {
+    // Enter grace period: broadcast submit_request so clients can wrap up their current step
+    if (!session.submit_request_sent && now >= session.deadline_ms - session.grace_period_ms) {
+      session.submit_request_sent = true;
+      const msg = { type: "submit_request", train_id: session.train_id, deadline_ms: session.deadline_ms };
+      for (const ws of session.clients) {
+        if (ws.readyState === WebSocket.OPEN) send(ws, msg);
+        else session.clients.delete(ws);
+      }
+    }
+
+    // Deadline: aggregate whatever was submitted, or roll the deadline forward
     if (now >= session.deadline_ms) {
       if (session.submissions > 0) {
         tryCompleteRound(session);
       } else {
         session.deadline_ms = now + session.round_duration_ms;
+        session.submit_request_sent = false;
       }
     }
   }
-}, 1000);
+}, 250);
 
 // WebSocket handler
 function handleWebSocket(req: Request): Response {
@@ -219,7 +239,7 @@ Deno.serve({ port: 4000 }, async (req) => {
 
   // POST /train — create session
   if (method === "POST" && pathname === "/train") {
-    let body: { weights?: number[]; quorum?: number; round_duration_ms?: number } = {};
+    let body: { weights?: number[]; quorum?: number; round_duration_ms?: number; grace_period_ms?: number } = {};
     try {
       body = await req.json();
     } catch {
@@ -229,6 +249,8 @@ Deno.serve({ port: 4000 }, async (req) => {
     const weights = body.weights ?? [0, 0, 0, 0];
     const quorum = body.quorum ?? 2;
     const round_duration_ms = body.round_duration_ms ?? 60000;
+    // Default grace period: 20% of round duration, minimum 500ms
+    const grace_period_ms = body.grace_period_ms ?? Math.max(500, Math.round(round_duration_ms * 0.2));
     const train_id = randomId();
     const now = Date.now();
 
@@ -238,7 +260,9 @@ Deno.serve({ port: 4000 }, async (req) => {
       weights: [...weights],
       quorum,
       round_duration_ms,
+      grace_period_ms,
       deadline_ms: now + round_duration_ms,
+      submit_request_sent: false,
       clients: new Set(),
       delta_accumulator: new Array(weights.length).fill(0),
       token_accumulator: 0,
@@ -279,7 +303,9 @@ Deno.serve({ port: 4000 }, async (req) => {
       weights: session.weights,
       quorum: session.quorum,
       round_duration_ms: session.round_duration_ms,
+      grace_period_ms: session.grace_period_ms,
       deadline_ms: session.deadline_ms,
+      submit_request_sent: session.submit_request_sent,
       clients: session.clients.size,
       submissions: session.submissions,
       token_accumulator: session.token_accumulator,
