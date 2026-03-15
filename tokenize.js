@@ -25,10 +25,11 @@ async function main() {
   console.log(`num merges:   ${numMerges}`);
   console.log(`val fraction: ${valFrac}\n`);
 
-  // Read data
-  const text = isDeno
+  // Read data and lowercase
+  const text = (isDeno
     ? Deno.readTextFileSync(dataPath)
-    : (await import('fs')).readFileSync(dataPath, 'utf-8');
+    : (await import('fs')).readFileSync(dataPath, 'utf-8')
+  ).toLowerCase();
 
   const textBytes = new TextEncoder().encode(text);
   console.log(`raw text:     ${text.length} chars, ${textBytes.length} bytes\n`);
