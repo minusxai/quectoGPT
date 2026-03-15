@@ -89,14 +89,21 @@ export async function* train(backendName, docs, opts = {}) {
     const lossFn = (p) => loss(p, cfg, tokenOH.ref, posOH.ref, targetOH.ref, n);
     const [lossVal, grads] = valueAndGrad(lossFn)(tree.ref(params));
 
+    // Read loss
+    const lossScalar = lossVal.item();
+
     // Optimizer step
-    const [updates, newOptState] = solver.update(grads, optState, tree.ref(params));
-    params = applyUpdates(params, updates);
+    const oldParams = params;
+    const oldOptState = optState;
+    const [updates, newOptState] = solver.update(grads, oldOptState, tree.ref(oldParams));
+    params = applyUpdates(oldParams, updates);
     optState = newOptState;
     await blockUntilReady(params);
 
-    // Read loss
-    const lossScalar = lossVal.item();
+    // Dispose per-step intermediates
+    tokenOH.dispose();
+    posOH.dispose();
+    targetOH.dispose();
 
     yield { type: 'step', step: step + 1, loss: lossScalar, n, totalSteps: numSteps };
   }
