@@ -3,7 +3,7 @@
 // Deno: deno run --allow-read --allow-net --unstable-webgpu train.js --backend=webgpu --model=medium
 // Browser: imported by index.html
 
-import { init, defaultDevice, numpy as np, nn, valueAndGrad, random, tree } from '@jax-js/jax';
+import { init, defaultDevice, numpy as np, nn, valueAndGrad, random, tree, blockUntilReady } from '@jax-js/jax';
 import { adam, applyUpdates } from '@jax-js/optax';
 import { MODEL_CONFIGS, resolveConfig, initParams, loss, inference } from './gpt.js';
 
@@ -58,7 +58,7 @@ export async function* train(backendName, docs, opts = {}) {
 
   // Init jax-js params
   const rngKey = random.key(seed);
-  let params = initParams(tokenizer.vocabSize, cfg, rngKey);
+  let params = await initParams(tokenizer.vocabSize, cfg, rngKey);
 
   // Count params
   const paramLeaves = tree.leaves(params);
@@ -93,6 +93,7 @@ export async function* train(backendName, docs, opts = {}) {
     const [updates, newOptState] = solver.update(grads, optState, tree.ref(params));
     params = applyUpdates(params, updates);
     optState = newOptState;
+    await blockUntilReady(params);
 
     // Read loss
     const lossScalar = lossVal.item();

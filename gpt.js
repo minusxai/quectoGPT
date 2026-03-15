@@ -1,7 +1,7 @@
 // quectoGPT model definition — pure functions, no side effects
 // Uses jax-js for tensor operations + autodiff
 
-import { numpy as np, nn, random, tree } from '@jax-js/jax';
+import { numpy as np, nn, random, tree, blockUntilReady } from '@jax-js/jax';
 
 // --- Model configs ---
 export const MODEL_CONFIGS = {
@@ -18,25 +18,21 @@ export function resolveConfig(name) {
   return { ...cfg, headDim: cfg.nEmbd / cfg.nHead };
 }
 
-// Helper: get the i-th key from a [N, 2] keys array
-function getKey(keys, i) {
-  return keys.ref.slice(i);
-}
-
 // --- Parameter initialization ---
-export function initParams(vocabSize, cfg, rngKey) {
+// Weights stored as [inDim, outDim] — no transpose needed in forward pass
+export async function initParams(vocabSize, cfg, rngKey) {
   const nEmbd = cfg.nEmbd;
   const s = Math.sqrt(3 / nEmbd);
   const numKeys = 3 + cfg.nLayer * 6;
 
   const keys = random.split(rngKey, numKeys);
   let ki = 0;
-  const nextKey = () => getKey(keys, ki++);
+  const nextKey = () => { ki++; return ki < numKeys ? keys.ref.slice(ki - 1) : keys.slice(ki - 1); };
 
   const params = {
     wte: random.normal(nextKey(), [vocabSize, nEmbd]).mul(cfg.initStd),
     wpe: random.normal(nextKey(), [cfg.blockSize, nEmbd]).mul(cfg.initStd),
-    lmHead: random.normal(nextKey(), [vocabSize, nEmbd]).mul(0.001),
+    lmHead: random.normal(nextKey(), [nEmbd, vocabSize]).mul(0.001),
     layers: [],
   };
 
@@ -46,12 +42,12 @@ export function initParams(vocabSize, cfg, rngKey) {
       wk: random.uniform(nextKey(), [nEmbd, nEmbd], { minval: -s, maxval: s }),
       wv: random.uniform(nextKey(), [nEmbd, nEmbd], { minval: -s, maxval: s }),
       wo: np.zeros([nEmbd, nEmbd]),
-      mlpFc1: random.uniform(nextKey(), [4 * nEmbd, nEmbd], { minval: -0.4 * s, maxval: 0.4 * s }),
-      mlpFc2: np.zeros([nEmbd, 4 * nEmbd]),
+      mlpFc1: random.uniform(nextKey(), [nEmbd, 4 * nEmbd], { minval: -0.4 * s, maxval: 0.4 * s }),
+      mlpFc2: np.zeros([4 * nEmbd, nEmbd]),
     });
   }
 
-  keys.dispose();
+  await blockUntilReady(params);
   return params;
 }
 
@@ -61,11 +57,6 @@ function rmsnorm(x) {
   return x.div(np.sqrt(ms.add(1e-5)));
 }
 
-// --- Linear: x @ w^T ---
-function linear(x, w) {
-  return np.matmul(x, np.transpose(w));
-}
-
 // --- Forward pass ---
 // tokenOH/posOH: pre-computed oneHot matrices [seqLen, vocabSize] and [seqLen, blockSize]
 // These must be computed OUTSIDE valueAndGrad to avoid tracing issues.
@@ -73,8 +64,8 @@ export function forward(params, cfg, tokenOH, posOH, seqLen) {
   const headDim = cfg.nEmbd / cfg.nHead;
 
   // Token + position embeddings via oneHot @ weight
-  let x = np.matmul(tokenOH, params.wte);     // [seqLen, nEmbd]
-  const posEmb = np.matmul(posOH, params.wpe); // [seqLen, nEmbd]
+  let x = np.dot(tokenOH, params.wte);     // [seqLen, nEmbd]
+  const posEmb = np.dot(posOH, params.wpe); // [seqLen, nEmbd]
   x = rmsnorm(x.add(posEmb));
 
   for (let li = 0; li < cfg.nLayer; li++) {
@@ -82,10 +73,10 @@ export function forward(params, cfg, tokenOH, posOH, seqLen) {
     const xResidual = x.ref;
     x = rmsnorm(x);
 
-    // QKV projections: [seqLen, nEmbd] -> [seqLen, nEmbd]
-    const q = linear(x.ref, layer.wq);
-    const k = linear(x.ref, layer.wk);
-    const v = linear(x, layer.wv);
+    // QKV projections: [seqLen, nEmbd] @ [nEmbd, nEmbd] -> [seqLen, nEmbd]
+    const q = np.dot(x.ref, layer.wq);
+    const k = np.dot(x.ref, layer.wk);
+    const v = np.dot(x, layer.wv);
 
     // Reshape to [seqLen, nHead, headDim] for dotProductAttention
     const qH = q.reshape([seqLen, cfg.nHead, headDim]);
@@ -97,17 +88,17 @@ export function forward(params, cfg, tokenOH, posOH, seqLen) {
 
     // Reshape back to [seqLen, nEmbd] and project
     const attnFlat = attnOut.reshape([seqLen, cfg.nEmbd]);
-    x = linear(attnFlat, layer.wo).add(xResidual);
+    x = np.dot(attnFlat, layer.wo).add(xResidual);
 
     // MLP block
     const mlpResidual = x.ref;
     x = rmsnorm(x);
-    x = nn.relu(linear(x, layer.mlpFc1));
-    x = linear(x, layer.mlpFc2).add(mlpResidual);
+    x = nn.relu(np.dot(x, layer.mlpFc1));     // [seqLen, 4*nEmbd]
+    x = np.dot(x, layer.mlpFc2).add(mlpResidual); // [seqLen, nEmbd]
   }
 
   // Output logits: [seqLen, vocabSize]
-  return linear(x, params.lmHead);
+  return np.dot(x, params.lmHead);
 }
 
 // --- Loss function ---
@@ -127,7 +118,7 @@ export async function inference(params, cfg, tokenizer, rngKey, opts = {}) {
   const sampleKeys = random.split(rngKey, numSamples);
 
   for (let s = 0; s < numSamples; s++) {
-    let sampleKey = getKey(sampleKeys, s);
+    let sampleKey = sampleKeys.ref.slice(s);
     let tokenIds = [tokenizer.BOS];
     const generated = [];
 
@@ -148,9 +139,8 @@ export async function inference(params, cfg, tokenizer, rngKey, opts = {}) {
 
       // Sample from categorical distribution
       const splitKeys = random.split(sampleKey, 2);
-      const k1 = getKey(splitKeys, 0);
-      sampleKey = getKey(splitKeys, 1);
-      splitKeys.dispose();
+      const k1 = splitKeys.ref.slice(0);
+      sampleKey = splitKeys.slice(1);
 
       const chosen = random.categorical(k1, scaled);
       const chosenId = chosen.item();
