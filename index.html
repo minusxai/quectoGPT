@@ -1223,15 +1223,31 @@ function leaveSession() {
   $('join-name').value = randomDeviceName();
 }
 
-async function connectWebSocket(trainId, name, initialWeights) {
+async function connectWebSocket(trainId, name) {
   ws = new WebSocket(SERVER_WS);
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: 'join', train_id: trainId, name }));
     enterSession(trainId);
     countdownTimer = setInterval(updateCountdown, 500);
-    startFederatedTraining(initialWeights);
   };
-  ws.onmessage = (e) => handleWsMessage(JSON.parse(e.data));
+  // First update from server is the authoritative initial state — use it to start training.
+  // Subsequent messages go through the normal handler.
+  let trainingStarted = false;
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (!trainingStarted && msg.type === 'update') {
+      trainingStarted = true;
+      // Apply initial state (version, deadline) without triggering a training restart
+      currentVersion = msg.payload.version;
+      currentDeadlineMs = msg.payload.deadline_ms;
+      $('sess-version').innerHTML = `<span class="dot"></span>v${currentVersion}`;
+      updateRoundStatus();
+      // Start training from server's authoritative weights ([] = round 0, populated = round N)
+      startFederatedTraining(msg.payload.weights || []);
+    } else {
+      handleWsMessage(msg);
+    }
+  };
   ws.onclose = ws.onerror = () => leaveSession();
 }
 
@@ -1434,7 +1450,7 @@ $('btn-new-session').onclick = async () => {
     const { train_id } = await res.json();
     currentQuorum = quorum;
     const name = $('join-name').value.trim();
-    await connectWebSocket(train_id, name, []); // start from random (seed=42)
+    await connectWebSocket(train_id, name);
   } catch (e) {
     console.error('Failed to create session:', e);
     alert('Could not reach server at ' + SERVER);
@@ -1450,8 +1466,7 @@ $('btn-join-session').onclick = async () => {
     currentQuorum = status.quorum;
     roundLossHistory = (status.loss_history || []).map(e => ({ version: e.version, avg_loss: e.avg_loss }));
     const name = $('join-name').value.trim();
-    // Use server's current global weights as starting point ([] on first round = random init)
-    await connectWebSocket(trainId, name, status.weights);
+    await connectWebSocket(trainId, name);
   } catch (e) {
     console.error('Failed to join session:', e);
     alert('Could not reach server at ' + SERVER);
