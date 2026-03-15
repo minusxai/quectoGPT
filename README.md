@@ -9,7 +9,8 @@ The entire pipeline — BPE tokenizer training, batched forward/backward, federa
 [Live demo](https://quectoGPT.minusxapps.com/index.html) (GPU training in Chrome recommended)
 
 
-![Screenshot](./img.png)
+<!-- ![Screenshot](./img.png) -->
+![GIF](./vid.gif)
 
 ## What this is
 
