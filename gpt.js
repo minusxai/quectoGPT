@@ -58,14 +58,23 @@ function rmsnorm(x) {
 }
 
 // --- Forward pass ---
-// tokenOH/posOH: pre-computed oneHot matrices [seqLen, vocabSize] and [seqLen, blockSize]
-// These must be computed OUTSIDE valueAndGrad to avoid tracing issues.
-export function forward(params, cfg, tokenOH, posOH, seqLen) {
+// tokenOH/posOH: pre-computed oneHot matrices
+//   Unbatched: [seqLen, vocabSize] and [seqLen, blockSize]
+//   Batched:   [B, seqLen, vocabSize] and [B, seqLen, blockSize]
+// seqLen: sequence length (JS number, needed for reshape)
+// batched: whether input has a batch dimension (default false)
+export function forward(params, cfg, tokenOH, posOH, seqLen, batched = false) {
   const headDim = cfg.nEmbd / cfg.nHead;
+  const reshapeQKV = batched
+    ? (t) => t.reshape([-1, seqLen, cfg.nHead, headDim])
+    : (t) => t.reshape([seqLen, cfg.nHead, headDim]);
+  const reshapeAttn = batched
+    ? (t) => t.reshape([-1, seqLen, cfg.nEmbd])
+    : (t) => t.reshape([seqLen, cfg.nEmbd]);
 
   // Token + position embeddings via oneHot @ weight
-  let x = np.dot(tokenOH, params.wte);     // [seqLen, nEmbd]
-  const posEmb = np.dot(posOH, params.wpe); // [seqLen, nEmbd]
+  let x = np.dot(tokenOH, params.wte);     // [..., seqLen, nEmbd]
+  const posEmb = np.dot(posOH, params.wpe); // [..., seqLen, nEmbd]
   x = rmsnorm(x.add(posEmb));
 
   for (let li = 0; li < cfg.nLayer; li++) {
@@ -73,40 +82,46 @@ export function forward(params, cfg, tokenOH, posOH, seqLen) {
     const xResidual = x.ref;
     x = rmsnorm(x);
 
-    // QKV projections: [seqLen, nEmbd] @ [nEmbd, nEmbd] -> [seqLen, nEmbd]
+    // QKV projections: [..., seqLen, nEmbd] @ [nEmbd, nEmbd] -> [..., seqLen, nEmbd]
     const q = np.dot(x.ref, layer.wq);
     const k = np.dot(x.ref, layer.wk);
     const v = np.dot(x, layer.wv);
 
-    // Reshape to [seqLen, nHead, headDim] for dotProductAttention
-    const qH = q.reshape([seqLen, cfg.nHead, headDim]);
-    const kH = k.reshape([seqLen, cfg.nHead, headDim]);
-    const vH = v.reshape([seqLen, cfg.nHead, headDim]);
+    // Reshape to [..., seqLen, nHead, headDim] for dotProductAttention
+    const qH = reshapeQKV(q);
+    const kH = reshapeQKV(k);
+    const vH = reshapeQKV(v);
 
-    // Scaled dot-product attention with causal mask (rank-3: no batch dim)
+    // Scaled dot-product attention with causal mask
     const attnOut = nn.dotProductAttention(qH, kH, vH, { isCausal: true });
 
-    // Reshape back to [seqLen, nEmbd] and project
-    const attnFlat = attnOut.reshape([seqLen, cfg.nEmbd]);
+    // Reshape back to [..., seqLen, nEmbd] and project
+    const attnFlat = reshapeAttn(attnOut);
     x = np.dot(attnFlat, layer.wo).add(xResidual);
 
     // MLP block
     const mlpResidual = x.ref;
     x = rmsnorm(x);
-    x = nn.relu(np.dot(x, layer.mlpFc1));     // [seqLen, 4*nEmbd]
-    x = np.dot(x, layer.mlpFc2).add(mlpResidual); // [seqLen, nEmbd]
+    x = nn.relu(np.dot(x, layer.mlpFc1));     // [..., seqLen, 4*nEmbd]
+    x = np.dot(x, layer.mlpFc2).add(mlpResidual); // [..., seqLen, nEmbd]
   }
 
-  // Output logits: [seqLen, vocabSize]
+  // Output logits: [..., seqLen, vocabSize]
   return np.dot(x, params.lmHead);
 }
 
 // --- Loss function ---
 // tokenOH, posOH, targetOH: pre-computed oneHot matrices (outside valueAndGrad)
-export function loss(params, cfg, tokenOH, posOH, targetOH, seqLen) {
-  const logits = forward(params, cfg, tokenOH, posOH, seqLen);
+// mask: optional [..., seqLen] binary mask (1 = real token, 0 = padding)
+export function loss(params, cfg, tokenOH, posOH, targetOH, seqLen, mask, batched = false) {
+  const logits = forward(params, cfg, tokenOH, posOH, seqLen, batched);
   const logprobs = nn.logSoftmax(logits, -1);
-  return np.mean(np.sum(logprobs.mul(targetOH), -1)).neg();
+  const perToken = np.sum(logprobs.mul(targetOH), -1).neg(); // [..., seqLen]
+  if (mask) {
+    // Masked mean: only count real (non-padded) tokens
+    return np.sum(perToken.mul(mask)).div(np.sum(mask));
+  }
+  return np.mean(perToken);
 }
 
 // --- Inference (sequential, no KV cache for simplicity) ---
@@ -129,7 +144,7 @@ export async function inference(params, cfg, tokenizer, rngKey, opts = {}) {
       const tokenOH = nn.oneHot(inputIds, tokenizer.vocabSize);
       const posOH = nn.oneHot(posIds, cfg.blockSize);
 
-      const logits = forward(tree.ref(params), cfg, tokenOH, posOH, seqLen);
+      const logits = forward(tree.ref(params), cfg, tokenOH, posOH, seqLen, false);
 
       // Take logits for last position: logits[seqLen-1, :] -> [vocabSize]
       const lastLogits = logits.slice(seqLen - 1);

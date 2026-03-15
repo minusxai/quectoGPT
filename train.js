@@ -44,6 +44,7 @@ export async function* train(backendName, docs, opts = {}) {
   const modelName = opts.model ?? 'nano';
   const cfg = resolveConfig(modelName);
   const numSteps = opts.steps ?? cfg.steps;
+  const batchSize = opts.batchSize ?? 8;
   const baseLR = opts.lr ?? cfg.lr;
   const seed = opts.seed ?? 42;
   const jsRng = mulberry32(seed);
@@ -70,24 +71,50 @@ export async function* train(backendName, docs, opts = {}) {
   const solver = adam(lrSchedule, { b1: 0.85, b2: 0.99 });
   let optState = solver.init(tree.ref(params));
 
-  yield { type: 'init', vocabSize: tokenizer.vocabSize, paramCount, backend: backendName, model: modelName, cfg };
+  yield { type: 'init', vocabSize: tokenizer.vocabSize, paramCount, backend: backendName, model: modelName, cfg, batchSize };
 
+  let docIdx = 0;
   for (let step = 0; step < numSteps; step++) {
-    const doc = shuffledDocs[step % shuffledDocs.length];
-    const tokens = tokenizer.encode(doc);
-    const n = Math.min(cfg.blockSize, tokens.length - 1);
+    // Collect a batch of docs
+    const batchTokens = [];
+    for (let b = 0; b < batchSize; b++) {
+      const doc = shuffledDocs[docIdx % shuffledDocs.length];
+      docIdx++;
+      const tokens = tokenizer.encode(doc);
+      batchTokens.push(tokens);
+    }
 
-    const inputIds = np.array(new Int32Array(tokens.slice(0, n)), { dtype: np.int32 });
-    const posIds = np.arange(n).astype(np.int32);
-    const targetIds = np.array(new Int32Array(tokens.slice(1, n + 1)), { dtype: np.int32 });
+    // Pad to max sequence length in batch (capped at blockSize)
+    const maxLen = Math.min(cfg.blockSize, Math.max(...batchTokens.map(t => t.length - 1)));
+
+    // Build padded input/target arrays and mask [B, maxLen]
+    const inputBuf = new Int32Array(batchSize * maxLen);
+    const targetBuf = new Int32Array(batchSize * maxLen);
+    const maskBuf = new Float32Array(batchSize * maxLen);
+
+    for (let b = 0; b < batchSize; b++) {
+      const tokens = batchTokens[b];
+      const n = Math.min(maxLen, tokens.length - 1);
+      for (let i = 0; i < n; i++) {
+        inputBuf[b * maxLen + i] = tokens[i];
+        targetBuf[b * maxLen + i] = tokens[i + 1];
+        maskBuf[b * maxLen + i] = 1.0;
+      }
+      // Remaining positions stay 0 (padded), mask stays 0
+    }
+
+    const inputIds = np.array(inputBuf, { dtype: np.int32 }).reshape([batchSize, maxLen]);
+    const posIds = np.tile(np.arange(maxLen).astype(np.int32), [batchSize, 1]);
+    const targetIds = np.array(targetBuf, { dtype: np.int32 }).reshape([batchSize, maxLen]);
+    const mask = np.array(maskBuf).reshape([batchSize, maxLen]);
 
     // Pre-compute oneHot matrices OUTSIDE valueAndGrad (avoids tracing issues)
-    const tokenOH = nn.oneHot(inputIds, tokenizer.vocabSize);
-    const posOH = nn.oneHot(posIds, cfg.blockSize);
-    const targetOH = nn.oneHot(targetIds, tokenizer.vocabSize);
+    const tokenOH = nn.oneHot(inputIds, tokenizer.vocabSize);   // [B, maxLen, vocabSize]
+    const posOH = nn.oneHot(posIds, cfg.blockSize);              // [B, maxLen, blockSize]
+    const targetOH = nn.oneHot(targetIds, tokenizer.vocabSize);  // [B, maxLen, vocabSize]
 
     // Forward + backward (ref params since valueAndGrad consumes its arg)
-    const lossFn = (p) => loss(p, cfg, tokenOH.ref, posOH.ref, targetOH.ref, n);
+    const lossFn = (p) => loss(p, cfg, tokenOH.ref, posOH.ref, targetOH.ref, maxLen, mask.ref, true);
     const [lossVal, grads] = valueAndGrad(lossFn)(tree.ref(params));
 
     // Read loss
@@ -105,8 +132,9 @@ export async function* train(backendName, docs, opts = {}) {
     tokenOH.dispose();
     posOH.dispose();
     targetOH.dispose();
+    // mask is consumed by valueAndGrad via .ref — no manual dispose needed
 
-    yield { type: 'step', step: step + 1, loss: lossScalar, n, totalSteps: numSteps };
+    yield { type: 'step', step: step + 1, loss: lossScalar, n: maxLen, totalSteps: numSteps, batchSize };
   }
 
   // Inference
@@ -131,6 +159,7 @@ async function main() {
   const modelName = getArg('model', 'nano');
   const backendArg = getArg('backend', 'cpu');
   const steps = getArg('steps', null);
+  const batch = getArg('batch', '8');
 
   // Initialize jax-js
   const devices = await init();
@@ -151,7 +180,7 @@ async function main() {
   console.log(`num docs: ${docs.length}`);
   console.log(`backend: ${backendDisplay}`);
 
-  const trainOpts = { model: modelName };
+  const trainOpts = { model: modelName, batchSize: parseInt(batch) };
   if (steps) trainOpts.steps = parseInt(steps);
 
   const gen = train(device, docs, trainOpts);
@@ -163,6 +192,7 @@ async function main() {
   for await (const event of gen) {
     if (event.type === 'init') {
       console.log(`vocab size: ${event.vocabSize}`);
+      console.log(`batch size: ${event.batchSize}`);
       console.log(`num params: ${event.paramCount.toLocaleString()}`);
     } else if (event.type === 'step') {
       write(`\rstep ${String(event.step).padStart(4)} / ${String(event.totalSteps).padStart(4)} | loss ${event.loss.toFixed(4)}`);
