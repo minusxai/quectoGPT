@@ -258,11 +258,22 @@ function handleWebSocket(req: Request): Response {
   return response;
 }
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
 // HTTP handler
 Deno.serve({ port: 4000 }, async (req) => {
   const url = new URL(req.url);
   const { pathname } = url;
   const method = req.method;
+
+  // CORS preflight
+  if (method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
 
   // WebSocket upgrade
   if (pathname === "/ws") {
@@ -307,7 +318,7 @@ Deno.serve({ port: 4000 }, async (req) => {
     };
 
     sessions.set(train_id, session);
-    return Response.json({ train_id, version: session.version }, { status: 201 });
+    return Response.json({ train_id, version: session.version }, { status: 201, headers: CORS_HEADERS });
   }
 
   // GET /train — list sessions
@@ -320,7 +331,7 @@ Deno.serve({ port: 4000 }, async (req) => {
       submissions: s.submissions,
       quorum: s.quorum,
     }));
-    return Response.json(list);
+    return Response.json(list, { headers: CORS_HEADERS });
   }
 
   // GET /train/:id — session status
@@ -328,7 +339,7 @@ Deno.serve({ port: 4000 }, async (req) => {
     const id = pathname.slice("/train/".length);
     const session = sessions.get(id);
     if (!session) {
-      return Response.json({ error: "not found" }, { status: 404 });
+      return Response.json({ error: "not found" }, { status: 404, headers: CORS_HEADERS });
     }
     return Response.json({
       train_id: session.train_id,
@@ -348,22 +359,22 @@ Deno.serve({ port: 4000 }, async (req) => {
       submissions: session.submissions,
       token_accumulator: session.token_accumulator,
       loss_history: session.loss_history,
-    });
+    }, { headers: CORS_HEADERS });
   }
 
   // DELETE /train/:id — remove session
   if (method === "DELETE" && pathname.startsWith("/train/")) {
     const id = pathname.slice("/train/".length);
     if (!sessions.has(id)) {
-      return Response.json({ error: "not found" }, { status: 404 });
+      return Response.json({ error: "not found" }, { status: 404, headers: CORS_HEADERS });
     }
     const session = sessions.get(id)!;
     for (const ws of session.clients) {
       send(ws, { type: "session_closed", train_id: id });
     }
     sessions.delete(id);
-    return Response.json({ deleted: id });
+    return Response.json({ deleted: id }, { headers: CORS_HEADERS });
   }
 
-  return Response.json({ error: "not found" }, { status: 404 });
+  return Response.json({ error: "not found" }, { status: 404, headers: CORS_HEADERS });
 });
