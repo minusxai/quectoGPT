@@ -1,6 +1,7 @@
 // quectrograd WebGPU backend — WGSL compute shaders
 // All ops work on GPUBuffer handles. toArray() is async (GPU readback).
 // No op in ops.js calls toArray — data stays on GPU throughout forward/backward.
+// Command batching: ops accumulate in a shared command encoder, flushed on toArray().
 
 export async function initWebGPU() {
   if (!navigator.gpu) throw new Error('WebGPU not available');
@@ -41,7 +42,7 @@ export async function initWebGPU() {
 
   function uniformBuf(uint32Values) {
     const data = new Uint32Array(uint32Values);
-    const size = Math.max(data.byteLength, 16); // min 16 bytes for uniform
+    const size = Math.max(data.byteLength, 16);
     const buf = device.createBuffer({
       size,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -52,22 +53,63 @@ export async function initWebGPU() {
     return buf;
   }
 
-  // Pack float as uint32 bit pattern for uniform buffers
   function f2u(f) {
     const a = new Float32Array([f]);
     return new Uint32Array(a.buffer)[0];
   }
 
+  // ===== Command batching =====
+  // Instead of submit per op, accumulate into a shared encoder.
+  // flush() submits when needed (toArray, buffer copies).
+
+  let currentEncoder = null;
+  let currentPass = null;
+
+  function ensurePass() {
+    if (!currentEncoder) {
+      currentEncoder = device.createCommandEncoder();
+    }
+    if (!currentPass) {
+      currentPass = currentEncoder.beginComputePass();
+    }
+  }
+
+  function endPass() {
+    if (currentPass) {
+      currentPass.end();
+      currentPass = null;
+    }
+  }
+
+  function getEncoder() {
+    if (!currentEncoder) {
+      currentEncoder = device.createCommandEncoder();
+    }
+    return currentEncoder;
+  }
+
+  function flush() {
+    endPass();
+    if (currentEncoder) {
+      device.queue.submit([currentEncoder.finish()]);
+      currentEncoder = null;
+    }
+  }
+
   function dispatch(pipeline, buffers, wgX, wgY = 1, wgZ = 1) {
+    ensurePass();
     const entries = buffers.map((buf, i) => ({ binding: i, resource: { buffer: buf } }));
     const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
-    const enc = device.createCommandEncoder();
-    const pass = enc.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(wgX, wgY, wgZ);
-    pass.end();
-    device.queue.submit([enc.finish()]);
+    currentPass.setPipeline(pipeline);
+    currentPass.setBindGroup(0, bindGroup);
+    currentPass.dispatchWorkgroups(wgX, wgY, wgZ);
+  }
+
+  // Buffer-to-buffer copy requires ending the compute pass
+  function copyBuf(src, srcOffset, dst, dstOffset, size) {
+    endPass();
+    const enc = getEncoder();
+    enc.copyBufferToBuffer(src, srcOffset, dst, dstOffset, size);
   }
 
   const wg = (n) => Math.ceil(n / 256);
@@ -103,7 +145,6 @@ struct P { M: u32, K: u32, N: u32, _p: u32 }
   out[r * p.N + c] = s;
 }`;
 
-  // X[M,K] @ W[N,K]^T = out[M,N], where out[i,j] = sum_k x[i,k] * w[j,k]
   const matmulWTWGSL = `
 struct P { M: u32, K: u32, N: u32, _p: u32 }
 @group(0) @binding(0) var<uniform> p: P;
@@ -182,7 +223,6 @@ struct P { rows: u32, srcCols: u32, start: u32, width: u32 }
   dst[r * p.width + c] = src[r * p.srcCols + p.start + c];
 }`;
 
-  // Backward of sliceCols: scatter into zeroed buffer at column offset
   const sliceColsBackwardWGSL = `
 struct P { rows: u32, dstCols: u32, start: u32, width: u32 }
 @group(0) @binding(0) var<uniform> p: P;
@@ -194,7 +234,6 @@ struct P { rows: u32, dstCols: u32, start: u32, width: u32 }
   dst[r * p.dstCols + p.start + c] = src[r * p.width + c];
 }`;
 
-  // Copy one input's columns into a destination buffer at a column offset
   const copyColsWGSL = `
 struct P { rows: u32, srcCols: u32, dstCols: u32, dstOff: u32 }
 @group(0) @binding(0) var<uniform> p: P;
@@ -206,7 +245,6 @@ struct P { rows: u32, srcCols: u32, dstCols: u32, dstOff: u32 }
   dst[r * p.dstCols + p.dstOff + c] = src[r * p.srcCols + c];
 }`;
 
-  // Extract columns from src at offset (backward of concatCols = splitCols)
   const extractColsWGSL = `
 struct P { rows: u32, srcCols: u32, dstCols: u32, srcOff: u32 }
 @group(0) @binding(0) var<uniform> p: P;
@@ -218,8 +256,6 @@ struct P { rows: u32, srcCols: u32, dstCols: u32, srcOff: u32 }
   dst[r * p.dstCols + c] = src[r * p.srcCols + p.srcOff + c];
 }`;
 
-  // Fused cross-entropy: softmax + mean(-log(p[target]))
-  // Single workgroup — fine for small sequence lengths
   const crossEntropyWGSL = `
 struct P { rows: u32, cols: u32 }
 @group(0) @binding(0) var<uniform> p: P;
@@ -255,7 +291,6 @@ struct P { rows: u32, cols: u32 }
   dlogits[idx] = val;
 }`;
 
-  // Backward shaders for existing ops
   const reluBackwardWGSL = `
 @group(0) @binding(0) var<storage, read> dout: array<f32>;
 @group(0) @binding(1) var<storage, read> x: array<f32>;
@@ -308,7 +343,6 @@ struct P { vocab: u32, dim: u32, seq: u32, _p: u32 }
 @compute @workgroup_size(256) fn main(@builtin(global_invocation_id) gid: vec3u) {
   let idx = gid.x; if (idx >= p.seq * p.dim) { return; }
   let i = idx / p.dim; let j = idx % p.dim;
-  // Race condition for duplicate ids — acceptable for small vocab
   dtable[ids[i] * p.dim + j] += dout[idx];
 }`;
 
@@ -365,7 +399,11 @@ struct P { lr: f32, b1: f32, b2: f32, eps: f32, bc1: f32, bc2: f32, cnt: u32, _p
     free(h) { if (h?.destroy) h.destroy(); },
     fromArray(arr) { return createGPUBuffer(arr instanceof Float32Array ? arr : new Float32Array(arr)); },
 
+    flush() { flush(); },
+
     async toArray(handle, size) {
+      // Flush all pending work before readback
+      flush();
       const staging = device.createBuffer({ size: size * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
       const enc = device.createCommandEncoder();
       enc.copyBufferToBuffer(handle, 0, staging, 0, size * 4);
@@ -384,7 +422,6 @@ struct P { lr: f32, b1: f32, b2: f32, eps: f32, bc1: f32, bc2: f32, cnt: u32, _p
       const u = uniformBuf([M, K, N, 0]);
       const out = emptyBuf(M * N);
       dispatch(pl, [u, a, b, out], Math.ceil(M / 16), Math.ceil(N / 16));
-      u.destroy();
       return out;
     },
 
@@ -393,7 +430,6 @@ struct P { lr: f32, b1: f32, b2: f32, eps: f32, bc1: f32, bc2: f32, cnt: u32, _p
       const u = uniformBuf([M, K, N, 0]);
       const out = emptyBuf(M * N);
       dispatch(pl, [u, x, w, out], Math.ceil(M / 16), Math.ceil(N / 16));
-      u.destroy();
       return out;
     },
 
@@ -438,7 +474,6 @@ struct P { s: f32, _p: u32 }
       const u = uniformBuf([f2u(s), 0]);
       const out = emptyBuf(size);
       dispatch(pl, [u, x, out], wg(size));
-      u.destroy();
       return out;
     },
 
@@ -455,7 +490,6 @@ struct P { s: f32, _p: u32 }
       const idsBuf = uploadIds(ids);
       const out = emptyBuf(seqLen * embdDim);
       dispatch(pl, [u, table, idsBuf, out], wg(seqLen * embdDim));
-      u.destroy(); idsBuf.destroy();
       return out;
     },
 
@@ -464,7 +498,6 @@ struct P { s: f32, _p: u32 }
       const u = uniformBuf([rows, cols]);
       const out = emptyBuf(rows * cols);
       dispatch(pl, [u, x, out], wg(rows));
-      u.destroy();
       return out;
     },
 
@@ -473,7 +506,6 @@ struct P { s: f32, _p: u32 }
       const u = uniformBuf([rows, cols]);
       const out = emptyBuf(rows * cols);
       dispatch(pl, [u, x, out], wg(rows));
-      u.destroy();
       return out;
     },
 
@@ -484,7 +516,6 @@ struct P { s: f32, _p: u32 }
       const probs = emptyBuf(rows * cols);
       const loss = emptyBuf(1);
       dispatch(pl, [u, logits, targetsBuf, probs, loss], 1);
-      u.destroy(); targetsBuf.destroy();
       return { lossHandle: loss, softmaxOut: probs };
     },
 
@@ -495,7 +526,6 @@ struct P { s: f32, _p: u32 }
       const u = uniformBuf([rows, totalCols, colStart, width]);
       const out = emptyBuf(rows * width);
       dispatch(pl, [u, x, out], wg(rows * width));
-      u.destroy();
       return out;
     },
 
@@ -507,7 +537,6 @@ struct P { s: f32, _p: u32 }
       for (let i = 0; i < handles.length; i++) {
         const u = uniformBuf([rows, widths[i], totalCols, colOff]);
         dispatch(pl, [u, handles[i], out], wg(rows * widths[i]));
-        u.destroy();
         colOff += widths[i];
       }
       return out;
@@ -515,11 +544,9 @@ struct P { s: f32, _p: u32 }
 
     stackRows(handles, n, cols) {
       const out = emptyBuf(n * cols);
-      const enc = device.createCommandEncoder();
       for (let i = 0; i < n; i++) {
-        enc.copyBufferToBuffer(handles[i], 0, out, i * cols * 4, cols * 4);
+        copyBuf(handles[i], 0, out, i * cols * 4, cols * 4);
       }
-      device.queue.submit([enc.finish()]);
       return out;
     },
 
@@ -528,36 +555,26 @@ struct P { s: f32, _p: u32 }
       const u = uniformBuf([rows, cols]);
       const out = emptyBuf(cols * rows);
       dispatch(pl, [u, x, out], wg(rows * cols));
-      u.destroy();
       return out;
     },
 
     // --- Backward ---
 
     matmulBackward(dC, a, b, M, K, N) {
-      // dA = dC[M,N] @ B^T => use matmul with B transposed
-      // dA[i,k] = sum_j dC[i,j] * B[k,j] => matmulWT(dC, B^T)... actually:
-      // dA = matmulWT where "W" = B reshaped. B is [K,N], dC is [M,N].
-      // dA[i,k] = sum_j dC[i,j] * B[k,j]. B is [K,N] => B "row" k has N elems.
-      // This is exactly matmulWT(dC[M,N], B[K,N]) = dA[M,K]
       const dA = this.matmulWT(dC, b, M, N, K);
-      // dB = A^T @ dC => transpose A then regular matmul
       const aT = this.transpose2D(a, M, K);
       const dB = this.matmul(aT, dC, K, M, N);
       return { dA, dB };
     },
 
     matmulWTBackward(dOut, x, w, M, K, N) {
-      // dx = dOut[M,N] @ W[N,K] (regular matmul)
       const dx = this.matmul(dOut, w, M, N, K);
-      // dw = dOut^T[N,M] @ X[M,K] (regular matmul)
       const dOutT = this.transpose2D(dOut, M, N);
       const dw = this.matmul(dOutT, x, N, M, K);
       return { dx, dw };
     },
 
     addBackward(dC, size) {
-      // Need separate copies for accumulation
       const pl = getOrCreatePipeline('copy', unary('out[i] = a[i];'));
       const dA = emptyBuf(size);
       const dB = emptyBuf(size);
@@ -601,7 +618,6 @@ struct P { s: f32, _p: u32 }
       const idsBuf = uploadIds(ids);
       const dtable = emptyBuf(vocabSize * embdDim);
       dispatch(pl, [u, dOut, idsBuf, dtable], wg(seqLen * embdDim));
-      u.destroy(); idsBuf.destroy();
       return dtable;
     },
 
@@ -610,7 +626,6 @@ struct P { s: f32, _p: u32 }
       const u = uniformBuf([rows, cols]);
       const dx = emptyBuf(rows * cols);
       dispatch(pl, [u, dOut, x, dx], wg(rows));
-      u.destroy();
       return dx;
     },
 
@@ -619,7 +634,6 @@ struct P { s: f32, _p: u32 }
       const u = uniformBuf([rows, cols]);
       const dx = emptyBuf(rows * cols);
       dispatch(pl, [u, dOut, softmaxOut, dx], wg(rows));
-      u.destroy();
       return dx;
     },
 
@@ -629,7 +643,6 @@ struct P { s: f32, _p: u32 }
       const targetsBuf = uploadIds(targets);
       const dlogits = emptyBuf(rows * cols);
       dispatch(pl, [u, softmaxOut, targetsBuf, dlogits], wg(rows * cols));
-      u.destroy(); targetsBuf.destroy();
       return dlogits;
     },
 
@@ -638,7 +651,6 @@ struct P { s: f32, _p: u32 }
       const u = uniformBuf([rows, totalCols, colStart, width]);
       const dx = emptyBuf(rows * totalCols);
       dispatch(pl, [u, dOut, dx], wg(rows * width));
-      u.destroy();
       return dx;
     },
 
@@ -651,7 +663,6 @@ struct P { s: f32, _p: u32 }
         const u = uniformBuf([rows, totalCols, w, colOff]);
         const out = emptyBuf(rows * w);
         dispatch(pl, [u, dOut, out], wg(rows * w));
-        u.destroy();
         results.push(out);
         colOff += w;
       }
@@ -660,13 +671,11 @@ struct P { s: f32, _p: u32 }
 
     splitRows(handle, n, cols) {
       const results = [];
-      const enc = device.createCommandEncoder();
       for (let i = 0; i < n; i++) {
         const buf = emptyBuf(cols);
-        enc.copyBufferToBuffer(handle, i * cols * 4, buf, 0, cols * 4);
+        copyBuf(handle, i * cols * 4, buf, 0, cols * 4);
         results.push(buf);
       }
-      device.queue.submit([enc.finish()]);
       return results;
     },
 
@@ -678,7 +687,6 @@ struct P { s: f32, _p: u32 }
       const bc2 = 1 - Math.pow(beta2, step);
       const u = uniformBuf([f2u(lr), f2u(beta1), f2u(beta2), f2u(eps), f2u(bc1), f2u(bc2), count, 0]);
       dispatch(pl, [u, params, grads, mBuf, vBuf], wg(count));
-      u.destroy();
     },
 
     // --- Utilities ---
@@ -705,7 +713,6 @@ struct P { s: f32, _p: u32 }
       const pl = getOrCreatePipeline('fill', fillWGSL);
       const u = uniformBuf([f2u(value), size]);
       dispatch(pl, [u, handle], wg(size));
-      u.destroy();
     },
   };
 }
