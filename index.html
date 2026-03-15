@@ -821,6 +821,7 @@ let roundSteps = 0;
 let roundLossSum = 0;
 let roundTokens = 0;
 let submitPending = false;
+let waitingForRound = false;  // true after submit: pause training until new round weights arrive
 let newRoundWeights = null;   // set by update msg → triggers training restart
 let roundStartFlat = null;    // flat weights at start of current round
 let trainingHandle = {};      // shared with train() to read live flat weights
@@ -1245,7 +1246,7 @@ function leaveSession() {
   $('controls-bar').hidden = false;
   $('banner-submit').hidden = true;
   roundSteps = 0; roundLossSum = 0; roundTokens = 0;
-  submitPending = false; newRoundWeights = null; roundStartFlat = null;
+  submitPending = false; waitingForRound = false; newRoundWeights = null; roundStartFlat = null;
   history.replaceState(null, '', location.pathname);
   $('join-name').value = randomDeviceName();
 }
@@ -1408,6 +1409,21 @@ async function startFederatedTraining(initialWeights) {
     $('stat-status').textContent = 'training';
 
     while (inSession && !abortFlag) {
+      // After submitting, pause until the server sends new round weights
+      if (waitingForRound) {
+        if (newRoundWeights) {
+          currentInitialWeights = newRoundWeights;
+          roundStartFlat = new Float32Array(newRoundWeights);
+          newRoundWeights = null;
+          waitingForRound = false;
+          $('stat-status').textContent = 'training';
+        } else {
+          $('stat-status').textContent = 'waiting for round…';
+          await new Promise(r => setTimeout(r, 200));
+          continue;
+        }
+      }
+
       // Large step count so the round timer drives restarts, not the step limit.
       // seed: 0 ensures all clients initialize from identical weights on round 0.
       const promptVal = $('input-prompt').value.trim();
@@ -1437,18 +1453,20 @@ async function startFederatedTraining(initialWeights) {
           if (stepCount % 5 === 0) drawChart();
           if (stepCount % 2 === 0) await new Promise(r => requestAnimationFrame(r));
 
-          // Submit on next step after submit_request arrives
+          // Submit then stop training — wait for new round weights before restarting
           if (submitPending) {
             submitPending = false;
             submitDelta();
+            waitingForRound = true;
+            break; // stop training after submit; outer while will wait for new weights
           }
 
-          // Restart with new global weights when server round completes
+          // Also restart if server sends new weights mid-training (e.g. late joiner)
           if (newRoundWeights) {
             currentInitialWeights = newRoundWeights;
-            roundStartFlat = new Float32Array(newRoundWeights); // base for next round's delta
+            roundStartFlat = new Float32Array(newRoundWeights);
             newRoundWeights = null;
-            break; // exits inner for-await, outer while restarts with new weights
+            break;
           }
         }
 
