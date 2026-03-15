@@ -20,4 +20,4 @@ jobs:
 
     - name: SSH, pull repo, rebuild and restart server
       run: |
-        ssh minusx@v2.minusxapi.com "cd /home/minusx/quectoGPT && git pull origin master && docker compose build server && sleep 10 && docker compose up -d --no-deps server"
+        ssh minusx@v2.minusxapi.com "cd /home/minusx/quectoGPT && git pull origin master && docker compose build server web && sleep 10 && docker compose up -d --no-deps server web"

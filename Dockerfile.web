@@ -1,0 +1,10 @@
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+FROM nginx:alpine
+COPY --from=deps /app/node_modules /usr/share/nginx/html/node_modules
+COPY . /usr/share/nginx/html/
+EXPOSE 7011
+CMD ["nginx", "-g", "daemon off;"]
