@@ -30,13 +30,15 @@ function lrMultiplier(step, totalSteps) {
 
 // --- Weight serialization helpers ---
 function flattenParams(params) {
-  const leaves = tree.leaves(params);
+  // tree.leaves() moves (consumes) the leaves — ref first so the original params stay alive
+  const leaves = tree.leaves(tree.ref(params));
   const total = leaves.reduce((s, l) => s + l.size, 0);
   const out = new Float32Array(total);
   let offset = 0;
   for (const leaf of leaves) {
     out.set(leaf.dataSync(), offset);
     offset += leaf.size;
+    leaf.dispose(); // release the ref we added
   }
   return out;
 }
