@@ -33,8 +33,9 @@ type PublishPayload = {
 
 const sessions = new Map<string, TrainSession>();
 
+// 6-char base-36 ID — ~2 billion possibilities, plenty for concurrent sessions
 function randomId(): string {
-  return crypto.randomUUID();
+  return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
 
 function send(ws: WebSocket, data: unknown) {

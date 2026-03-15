@@ -610,11 +610,11 @@
         </div>
         <div class="field-row">
           <label class="control-label">Round (s)</label>
-          <input class="input-field" id="new-round" type="number" value="60" min="5" style="width:70px">
+          <input class="input-field" id="new-round" type="number" value="15" min="5" style="width:70px">
         </div>
         <div class="field-row">
           <label class="control-label">Grace (s)</label>
-          <input class="input-field" id="new-grace" type="number" value="12" min="1" style="width:70px">
+          <input class="input-field" id="new-grace" type="number" value="3" min="1" style="width:70px">
         </div>
         <button class="btn primary" id="btn-new-session">Start Session</button>
       </div>
@@ -812,6 +812,8 @@ let trainingHandle = {};      // shared with train() to read live flat weights
 
 const SERVER = 'http://localhost:4000';
 const SERVER_WS = 'ws://localhost:4000/ws';
+const DEFAULT_ROUND_SECS = 15;   // sync interval — round duration in seconds
+const DEFAULT_GRACE_SECS = 3;    // grace period before round closes
 
 // Auto-generate a memorable device name
 function randomDeviceName() {
@@ -1193,7 +1195,7 @@ function enterSession(trainId) {
   $('panel-lobby').hidden = true;
   $('panel-session').hidden = false;
   $('controls-bar').hidden = true;
-  $('sess-id').textContent = trainId.slice(0, 8) + '…';
+  $('sess-id').textContent = trainId;
   roundLossHistory = [];
   drawSessChart();
   history.replaceState(null, '', `?session=${trainId}`);
@@ -1443,8 +1445,8 @@ async function startFederatedTraining(initialWeights) {
 // --- Session button handlers ---
 $('btn-new-session').onclick = async () => {
   const quorum = parseInt($('new-quorum').value) || 2;
-  const round_duration_ms = (parseInt($('new-round').value) || 60) * 1000;
-  const grace_period_ms = (parseInt($('new-grace').value) || 12) * 1000;
+  const round_duration_ms = (parseInt($('new-round').value) || DEFAULT_ROUND_SECS) * 1000;
+  const grace_period_ms = (parseInt($('new-grace').value) || DEFAULT_GRACE_SECS) * 1000;
   try {
     const res = await fetch(`${SERVER}/train`, {
       method: 'POST',
