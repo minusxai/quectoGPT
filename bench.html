@@ -974,16 +974,21 @@ async function runTrainingBench(backendName) {
   $('train-count').textContent = '';
 
   try {
-    const resp = await fetch('input.txt');
-    const text = await resp.text();
-    const docs = text.split('\n').filter(l => l.trim());
+    const { buildBPETokenizer } = await import('./bpe.js');
+    const tokResp = await fetch('data/names.tok.json');
+    const tokJson = await tokResp.json();
+    const tokenizer = buildBPETokenizer(tokJson.merges);
+    const trainResp = await fetch('data/names.train.bin');
+    const trainData = new Uint16Array(await trainResp.arrayBuffer());
+    const valResp = await fetch('data/names.val.bin');
+    const valData = new Uint16Array(await valResp.arrayBuffer());
 
     const { train } = await import('./train.js');
     const steps = 10;
 
     const t0 = performance.now();
     const losses = [];
-    const gen = train(backendName, docs, { steps, model: 'nano' });
+    const gen = train(backendName, trainData, valData, tokenizer, { steps, model: 'nano' });
 
     for await (const event of gen) {
       if (event.type === 'step') {
