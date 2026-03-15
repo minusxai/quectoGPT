@@ -697,14 +697,17 @@ async function finiteDiffCheck(opFn, inputShapes, eps = 1e-4) {
     return random.uniform(k, shape, { minval: -1, maxval: 1 });
   });
 
+  const inputDatas = inputs.map(inp => inp.ref.dataSync());
+  const inputShapesActual = inputs.map(inp => inp.ref.shape);
+
   const results = [];
   for (let inputIdx = 0; inputIdx < inputs.length; inputIdx++) {
     const gradFn = grad((...args) => np.sum(opFn(...args)), { argnums: inputIdx });
     const analyticGrad = gradFn(...inputs.map(x => x.ref));
     const analyticArr = analyticGrad.dataSync();
 
-    const inputData = inputs[inputIdx].dataSync();
-    const shape = inputs[inputIdx].shape;
+    const inputData = inputDatas[inputIdx];
+    const shape = inputShapesActual[inputIdx];
     const numericGrad = new Float32Array(inputData.length);
 
     for (let i = 0; i < inputData.length; i++) {
@@ -753,11 +756,11 @@ async function runCorrectnessTests() {
       }
     },
     {
-      name: 'matmulWT forward',
+      name: 'dot (linear) forward',
       fn: async () => {
         const x = np.array([[1, 2]]);
-        const w = np.array([[3, 4], [5, 6], [7, 8]]);
-        const out = np.matmul(x, np.transpose(w));
+        const w = np.array([[3, 5, 7], [4, 6, 8]]);  // [inDim=2, outDim=3]
+        const out = np.dot(x, w);
         const result = out.dataSync();
         const expected = new Float32Array([11, 17, 23]);
         const err = maxAbsError(result, expected);
@@ -882,7 +885,7 @@ async function runCorrectnessTests() {
   // --- Gradient checks ---
   const gradChecks = [
     { name: 'matmul', fn: (a, b) => np.matmul(a, b), shapes: [[2, 3], [3, 2]] },
-    { name: 'matmulWT', fn: (x, w) => np.matmul(x, np.transpose(w)), shapes: [[2, 3], [4, 3]] },
+    { name: 'dot (linear)', fn: (x, w) => np.dot(x, w), shapes: [[2, 3], [3, 4]] },
     { name: 'add', fn: (a, b) => a.add(b), shapes: [[2, 3], [2, 3]] },
     { name: 'relu', fn: (a) => nn.relu(a), shapes: [[2, 3]] },
     { name: 'scale', fn: (a) => a.mul(0.5), shapes: [[2, 3]] },
@@ -937,7 +940,7 @@ async function runBenchmarks() {
   for (const n of [16, 64, 256]) {
     const a = np.ones([n, n]);
     const b = np.ones([n, n]);
-    const ms = await timeIt(() => { const c = np.matmul(a.ref, b.ref); c.dataSync(); });
+    const ms = await timeIt(() => { const c = np.dot(a.ref, b.ref); c.dataSync(); });
     addRow('matmul', `${n}\u00D7${n}`, ms);
     a.dispose(); b.dispose();
   }

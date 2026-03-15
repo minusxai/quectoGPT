@@ -6,7 +6,7 @@ quectoGPT is a JavaScript port of Karpathy's microgpt.py — a minimal GPT train
 
 ## How to run
 
-**IMPORTANT: Always use Deno to run JS files, NEVER use Node.** Deno is installed at `~/.deno/bin/deno`. If not on PATH, use the full path. Install: `curl -fsSL https://deno.land/install.sh | sh`, then add `~/.deno/bin` to PATH.
+**IMPORTANT: Always use Deno to run JS files, NEVER use node.** Deno is installed at `~/.deno/bin/deno`. If not on PATH, use the full path. Install: `curl -fsSL https://deno.land/install.sh | sh`, then add `~/.deno/bin` to PATH.
 
 ```bash
 # Train (CPU/Wasm)
@@ -50,11 +50,11 @@ python -m http.server
 
 - Pure ES modules throughout (`import`/`export`), no bundler.
 - npm dependencies: `@jax-js/jax` and `@jax-js/optax`. Browser uses esm.sh CDN via import maps.
-- Weights stored as `[outDim, inDim]`. Forward uses `np.matmul(x, np.transpose(w))`.
+- Weights stored as `[inDim, outDim]`. Forward uses `np.dot(x, w)` — no transpose needed.
 - Reference counting: use `.ref` when an array is consumed by multiple ops. Use `tree.ref(params)` to ref all leaves.
 - `tree.dispose()` to free arrays when done.
 - Params are a nested pytree — `valueAndGrad` differentiates w.r.t. the first argument automatically.
-- `train.js` and `bench.js` have runtime detection for Node vs Deno (file I/O, args, stdout).
+- `train.js` and `bench.js` have runtime detection for Deno vs other runtimes (file I/O, args, stdout).
 - Backend init: `await init()` returns available devices, then `defaultDevice("wasm"` or `"webgpu")`.
 
 ## Testing
