@@ -821,8 +821,6 @@ let roundSteps = 0;
 let roundLossSum = 0;
 let roundTokens = 0;
 let submitPending = false;
-let waitingForRound = false;  // true after submit: pause training until new round weights arrive
-let newRoundWeights = null;   // set by update msg → triggers training restart
 let roundStartFlat = null;    // flat weights at start of current round
 let trainingHandle = {};      // shared with train() to read live flat weights
 
@@ -1246,7 +1244,7 @@ function leaveSession() {
   $('controls-bar').hidden = false;
   $('banner-submit').hidden = true;
   roundSteps = 0; roundLossSum = 0; roundTokens = 0;
-  submitPending = false; waitingForRound = false; newRoundWeights = null; roundStartFlat = null;
+  submitPending = false; roundStartFlat = null;
   history.replaceState(null, '', location.pathname);
   $('join-name').value = randomDeviceName();
 }
@@ -1299,10 +1297,9 @@ function handleWsMessage(msg) {
     updateRoundStatus();
     drawSessChart();
     $('banner-submit').hidden = true;
-    // Signal training loop to restart with new global weights.
-    // Only on genuine round completions (avg_loss != null), not on initial join update.
+    // On genuine round completion, restart training with new global weights
     if (msg.payload.avg_loss != null && msg.payload.weights?.length > 0) {
-      newRoundWeights = msg.payload.weights;
+      startFederatedTraining(msg.payload.weights);
     }
   }
   if (msg.type === 'clients_changed') {
@@ -1378,21 +1375,21 @@ function submitDelta() {
 }
 
 async function startFederatedTraining(initialWeights) {
-  if (running) return;
+  // Abort any running training, wait for it to stop
+  if (running) {
+    abortFlag = true;
+    while (running) await new Promise(r => setTimeout(r, 50));
+  }
   running = true;
   abortFlag = false;
-  lossHistory = [];
   trainingHandle = {};
   roundSteps = 0; roundLossSum = 0; roundTokens = 0;
   roundStartFlat = initialWeights?.length > 0 ? new Float32Array(initialWeights) : null;
 
   $('stat-status').textContent = 'loading data…';
-  $('samples-body').innerHTML = '<div class="samples-empty">Training in progress…</div>';
 
   try {
     const dataset = $('input-dataset').value;
-
-    // Load tokenizer and binary token data (same as local training)
     const tokJson = await fetch(`data/${dataset}.tok.json`).then(r => r.json());
     const tokenizer = buildBPETokenizer(tokJson.merges);
     const trainData = new Uint16Array(await fetch(`data/${dataset}.train.bin`).then(r => r.arrayBuffer()));
@@ -1404,76 +1401,47 @@ async function startFederatedTraining(initialWeights) {
     const model = $('input-model').value;
     const t0 = performance.now();
     let stepCount = 0;
-    let currentInitialWeights = initialWeights;
 
     $('stat-status').textContent = 'training';
 
-    while (inSession && !abortFlag) {
-      // After submitting, pause until the server sends new round weights
-      if (waitingForRound) {
-        if (newRoundWeights) {
-          currentInitialWeights = newRoundWeights;
-          roundStartFlat = new Float32Array(newRoundWeights);
-          newRoundWeights = null;
-          waitingForRound = false;
-          $('stat-status').textContent = 'training';
-        } else {
-          $('stat-status').textContent = 'waiting for round…';
-          await new Promise(r => setTimeout(r, 200));
-          continue;
+    const promptVal = $('input-prompt').value.trim();
+    const valEveryVal = parseInt($('input-valevery').value.trim()) || undefined;
+    const gen = train(device, trainData, valData, tokenizer, { model, handle: trainingHandle, initialWeights, steps: 999999, seed: 0, ...(promptVal && { prompt: promptVal }), ...(valEveryVal && { valEvery: valEveryVal }) });
+
+    for await (const event of gen) {
+      if (!inSession || abortFlag) break;
+
+      if (event.type === 'init') {
+        $('badge-backend').innerHTML = `<span class="dot"></span>${event.backend.toUpperCase()}`;
+        $('badge-backend').classList.add('active');
+        $('badge-params').innerHTML = `<span class="dot"></span>${event.paramCount.toLocaleString()} params`;
+        $('badge-vocab').innerHTML = `<span class="dot"></span>vocab ${event.vocabSize}`;
+      }
+
+      if (event.type === 'step') {
+        stepCount++;
+        lossHistory.push(event.loss);
+        roundSteps++;
+        roundLossSum += event.loss;
+        roundTokens += event.batchSize ?? 8;
+        updateStats(event);
+        const elapsed = performance.now() - t0;
+        $('stat-elapsed').textContent = formatTime(elapsed);
+        $('stat-speed').textContent = (stepCount / (elapsed / 1000)).toFixed(1);
+        if (stepCount % 5 === 0) drawChart();
+        if (stepCount % 2 === 0) await new Promise(r => requestAnimationFrame(r));
+
+        if (submitPending) {
+          submitPending = false;
+          submitDelta();
+          abortFlag = true; // stop training after submit; handleWsMessage restarts with new weights
+          break;
         }
       }
 
-      // Large step count so the round timer drives restarts, not the step limit.
-      // seed: 0 ensures all clients initialize from identical weights on round 0.
-      const promptVal = $('input-prompt').value.trim();
-      const valEveryVal = parseInt($('input-valevery').value.trim()) || undefined;
-      const gen = train(device, trainData, valData, tokenizer, { model, handle: trainingHandle, initialWeights: currentInitialWeights, steps: 999999, seed: 0, ...(promptVal && { prompt: promptVal }), ...(valEveryVal && { valEvery: valEveryVal }) });
-
-      for await (const event of gen) {
-        if (!inSession || abortFlag) break;
-
-        if (event.type === 'init') {
-          $('badge-backend').innerHTML = `<span class="dot"></span>${event.backend.toUpperCase()}`;
-          $('badge-backend').classList.add('active');
-          $('badge-params').innerHTML = `<span class="dot"></span>${event.paramCount.toLocaleString()} params`;
-          $('badge-vocab').innerHTML = `<span class="dot"></span>vocab ${event.vocabSize}`;
-        }
-
-        if (event.type === 'step') {
-          stepCount++;
-          lossHistory.push(event.loss);
-          roundSteps++;
-          roundLossSum += event.loss;
-          roundTokens += event.batchSize ?? 8;
-          updateStats(event);
-          const elapsed = performance.now() - t0;
-          $('stat-elapsed').textContent = formatTime(elapsed);
-          $('stat-speed').textContent = (stepCount / (elapsed / 1000)).toFixed(1);
-          if (stepCount % 5 === 0) drawChart();
-          if (stepCount % 2 === 0) await new Promise(r => requestAnimationFrame(r));
-
-          // Submit then stop training — wait for new round weights before restarting
-          if (submitPending) {
-            submitPending = false;
-            submitDelta();
-            waitingForRound = true;
-            break; // stop training after submit; outer while will wait for new weights
-          }
-
-          // Also restart if server sends new weights mid-training (e.g. late joiner)
-          if (newRoundWeights) {
-            currentInitialWeights = newRoundWeights;
-            roundStartFlat = new Float32Array(newRoundWeights);
-            newRoundWeights = null;
-            break;
-          }
-        }
-
-        if (event.type === 'done') {
-          showSamples(event.samples);
-          drawChart();
-        }
+      if (event.type === 'done') {
+        showSamples(event.samples);
+        drawChart();
       }
     }
 
