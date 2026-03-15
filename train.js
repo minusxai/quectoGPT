@@ -1,26 +1,15 @@
 // quectoGPT training — training loop with jax-js
-// Node: node train.js [--backend=cpu|webgpu] [--steps=200] [--model=medium]
-// Deno: deno run --allow-read --allow-net --unstable-webgpu train.js --backend=webgpu --model=medium
+// Deno: deno run --allow-read --allow-net --allow-env train.js --dataset=names [--backend=cpu] [--steps=200] [--model=medium] [--batch=8]
 // Browser: imported by index.html
 
 import { init, defaultDevice, numpy as np, nn, valueAndGrad, random, tree, blockUntilReady } from '@jax-js/jax';
 import { adam, applyUpdates } from '@jax-js/optax';
 import { MODEL_CONFIGS, resolveConfig, initParams, loss, inference } from './gpt.js';
+import { buildBPETokenizer } from './bpe.js';
 
-export { MODEL_CONFIGS };
+export { MODEL_CONFIGS, buildBPETokenizer };
 
-// --- Tokenizer (byte-level) ---
-export function buildTokenizer() {
-  const BOS = 256, EOS = 257;
-  const vocabSize = 258;
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-  const encode = (str) => [BOS, ...encoder.encode(str), EOS];
-  const decode = (ids) => decoder.decode(new Uint8Array(ids.filter(id => id < 256)));
-  return { BOS, EOS, vocabSize, encode, decode };
-}
-
-// --- Seeded RNG (for doc shuffling — JS side) ---
+// --- Seeded RNG (for batch sampling — JS side) ---
 function mulberry32(seed) {
   return function () {
     seed |= 0; seed = seed + 0x6D2B79F5 | 0;
@@ -39,24 +28,37 @@ function lrMultiplier(step, totalSteps) {
   return (totalSteps - step) / (totalSteps - decayStart);
 }
 
+// --- Sample a batch of random windows from token data ---
+function sampleBatch(tokenData, batchSize, blockSize, rng) {
+  const maxStart = tokenData.length - blockSize - 1;
+  const inputBuf = new Int32Array(batchSize * blockSize);
+  const targetBuf = new Int32Array(batchSize * blockSize);
+
+  for (let b = 0; b < batchSize; b++) {
+    const start = Math.floor(rng() * maxStart);
+    for (let i = 0; i < blockSize; i++) {
+      inputBuf[b * blockSize + i] = tokenData[start + i];
+      targetBuf[b * blockSize + i] = tokenData[start + i + 1];
+    }
+  }
+
+  return { inputBuf, targetBuf };
+}
+
 // --- Training generator ---
-export async function* train(backendName, docs, opts = {}) {
+// trainData/valData: Uint16Array of pre-tokenized tokens
+// tokenizer: { encode, decode, vocabSize, BOS, EOS } from buildBPETokenizer
+export async function* train(backendName, trainData, valData, tokenizer, opts = {}) {
   const modelName = opts.model ?? 'nano';
   const cfg = resolveConfig(modelName);
   const numSteps = opts.steps ?? cfg.steps;
   const batchSize = opts.batchSize ?? 8;
   const baseLR = opts.lr ?? cfg.lr;
   const seed = opts.seed ?? 42;
+  const valEvery = opts.valEvery ?? Math.max(1, Math.floor(numSteps / 20)); // ~20 val evals
+  const valBatches = opts.valBatches ?? 4; // average val loss over this many batches
   const jsRng = mulberry32(seed);
-
-  // Shuffle docs
-  const shuffledDocs = [...docs];
-  for (let i = shuffledDocs.length - 1; i > 0; i--) {
-    const j = Math.floor(jsRng() * (i + 1));
-    [shuffledDocs[i], shuffledDocs[j]] = [shuffledDocs[j], shuffledDocs[i]];
-  }
-
-  const tokenizer = buildTokenizer();
+  const valRng = mulberry32(seed + 999);
 
   // Init jax-js params
   const rngKey = random.key(seed);
@@ -71,53 +73,30 @@ export async function* train(backendName, docs, opts = {}) {
   const solver = adam(lrSchedule, { b1: 0.85, b2: 0.99 });
   let optState = solver.init(tree.ref(params));
 
-  yield { type: 'init', vocabSize: tokenizer.vocabSize, paramCount, backend: backendName, model: modelName, cfg, batchSize };
+  yield {
+    type: 'init', vocabSize: tokenizer.vocabSize, paramCount,
+    backend: backendName, model: modelName, cfg, batchSize,
+    trainTokens: trainData.length, valTokens: valData ? valData.length : 0,
+  };
 
-  let docIdx = 0;
+  const seqLen = cfg.blockSize;
+
   for (let step = 0; step < numSteps; step++) {
-    // Collect a batch of docs
-    const batchTokens = [];
-    for (let b = 0; b < batchSize; b++) {
-      const doc = shuffledDocs[docIdx % shuffledDocs.length];
-      docIdx++;
-      const tokens = tokenizer.encode(doc);
-      batchTokens.push(tokens);
-    }
+    // Sample batch from training data
+    const { inputBuf, targetBuf } = sampleBatch(trainData, batchSize, seqLen, jsRng);
 
-    // Pad to max sequence length in batch (capped at blockSize)
-    const maxLen = Math.min(cfg.blockSize, Math.max(...batchTokens.map(t => t.length - 1)));
-
-    // Build padded input/target arrays and mask [B, maxLen]
-    const inputBuf = new Int32Array(batchSize * maxLen);
-    const targetBuf = new Int32Array(batchSize * maxLen);
-    const maskBuf = new Float32Array(batchSize * maxLen);
-
-    for (let b = 0; b < batchSize; b++) {
-      const tokens = batchTokens[b];
-      const n = Math.min(maxLen, tokens.length - 1);
-      for (let i = 0; i < n; i++) {
-        inputBuf[b * maxLen + i] = tokens[i];
-        targetBuf[b * maxLen + i] = tokens[i + 1];
-        maskBuf[b * maxLen + i] = 1.0;
-      }
-      // Remaining positions stay 0 (padded), mask stays 0
-    }
-
-    const inputIds = np.array(inputBuf, { dtype: np.int32 }).reshape([batchSize, maxLen]);
-    const posIds = np.tile(np.arange(maxLen).astype(np.int32), [batchSize, 1]);
-    const targetIds = np.array(targetBuf, { dtype: np.int32 }).reshape([batchSize, maxLen]);
-    const mask = np.array(maskBuf).reshape([batchSize, maxLen]);
+    const inputIds = np.array(inputBuf, { dtype: np.int32 }).reshape([batchSize, seqLen]);
+    const posIds = np.tile(np.arange(seqLen).astype(np.int32), [batchSize, 1]);
+    const targetIds = np.array(targetBuf, { dtype: np.int32 }).reshape([batchSize, seqLen]);
 
     // Pre-compute oneHot matrices OUTSIDE valueAndGrad (avoids tracing issues)
-    const tokenOH = nn.oneHot(inputIds, tokenizer.vocabSize);   // [B, maxLen, vocabSize]
-    const posOH = nn.oneHot(posIds, cfg.blockSize);              // [B, maxLen, blockSize]
-    const targetOH = nn.oneHot(targetIds, tokenizer.vocabSize);  // [B, maxLen, vocabSize]
+    const tokenOH = nn.oneHot(inputIds, tokenizer.vocabSize);   // [B, seqLen, vocabSize]
+    const posOH = nn.oneHot(posIds, cfg.blockSize);              // [B, seqLen, blockSize]
+    const targetOH = nn.oneHot(targetIds, tokenizer.vocabSize);  // [B, seqLen, vocabSize]
 
-    // Forward + backward (ref params since valueAndGrad consumes its arg)
-    const lossFn = (p) => loss(p, cfg, tokenOH.ref, posOH.ref, targetOH.ref, maxLen, mask.ref, true);
+    // Forward + backward
+    const lossFn = (p) => loss(p, cfg, tokenOH.ref, posOH.ref, targetOH.ref, seqLen, null, true);
     const [lossVal, grads] = valueAndGrad(lossFn)(tree.ref(params));
-
-    // Read loss
     const lossScalar = lossVal.item();
 
     // Optimizer step
@@ -132,17 +111,40 @@ export async function* train(backendName, docs, opts = {}) {
     tokenOH.dispose();
     posOH.dispose();
     targetOH.dispose();
-    // mask is consumed by valueAndGrad via .ref — no manual dispose needed
 
-    yield { type: 'step', step: step + 1, loss: lossScalar, n: maxLen, totalSteps: numSteps, batchSize };
+    const event = { type: 'step', step: step + 1, loss: lossScalar, totalSteps: numSteps, batchSize };
+
+    // Val loss evaluation
+    if (valData && valData.length > seqLen + 1 && (step + 1) % valEvery === 0) {
+      let valLossSum = 0;
+      for (let vb = 0; vb < valBatches; vb++) {
+        const val = sampleBatch(valData, batchSize, seqLen, valRng);
+        const vInput = np.array(val.inputBuf, { dtype: np.int32 }).reshape([batchSize, seqLen]);
+        const vPos = np.tile(np.arange(seqLen).astype(np.int32), [batchSize, 1]);
+        const vTarget = np.array(val.targetBuf, { dtype: np.int32 }).reshape([batchSize, seqLen]);
+        const vTokOH = nn.oneHot(vInput, tokenizer.vocabSize);
+        const vPosOH = nn.oneHot(vPos, cfg.blockSize);
+        const vTargOH = nn.oneHot(vTarget, tokenizer.vocabSize);
+        const vLoss = loss(tree.ref(params), cfg, vTokOH, vPosOH, vTargOH, seqLen, null, true);
+        valLossSum += vLoss.item();
+        vTokOH.dispose();
+        vPosOH.dispose();
+        vTargOH.dispose();
+      }
+      event.valLoss = valLossSum / valBatches;
+    }
+
+    yield event;
   }
 
   // Inference
   const inferKey = random.key(seed + 1);
-  const samples = await inference(params, cfg, tokenizer, inferKey, {
-    temperature: 0.5,
-    numSamples: 20,
-  });
+  const inferOpts = {
+    temperature: opts.temperature ?? 0.5,
+    numSamples: opts.numSamples ?? 20,
+  };
+  if (opts.prompt) inferOpts.prompt = opts.prompt;
+  const samples = await inference(params, cfg, tokenizer, inferKey, inferOpts);
 
   yield { type: 'done', samples, tokenizer };
 }
@@ -156,10 +158,12 @@ async function main() {
     return a ? a.split('=')[1] : def;
   };
 
+  const dataset = getArg('dataset', 'names');
   const modelName = getArg('model', 'nano');
   const backendArg = getArg('backend', 'cpu');
   const steps = getArg('steps', null);
   const batch = getArg('batch', '8');
+  const prompt = getArg('prompt', null);
 
   // Initialize jax-js
   const devices = await init();
@@ -170,20 +174,38 @@ async function main() {
   }
   defaultDevice(device);
 
-  const text = isDeno
-    ? Deno.readTextFileSync('input.txt')
-    : (await import('fs')).readFileSync('input.txt', 'utf-8');
-  const docs = text.split('\n').filter(l => l.trim());
+  // Load tokenizer
+  const tokText = isDeno
+    ? Deno.readTextFileSync(`data/${dataset}.tok.json`)
+    : (await import('fs')).readFileSync(`data/${dataset}.tok.json`, 'utf-8');
+  const tokJson = JSON.parse(tokText);
+  const tokenizer = buildBPETokenizer(tokJson.merges);
+
+  // Load pre-tokenized binary data
+  let trainData, valData;
+  if (isDeno) {
+    trainData = new Uint16Array(Deno.readFileSync(`data/${dataset}.train.bin`).buffer);
+    valData = new Uint16Array(Deno.readFileSync(`data/${dataset}.val.bin`).buffer);
+  } else {
+    const fs = await import('fs');
+    const trainBuf = fs.readFileSync(`data/${dataset}.train.bin`);
+    const valBuf = fs.readFileSync(`data/${dataset}.val.bin`);
+    trainData = new Uint16Array(trainBuf.buffer, trainBuf.byteOffset, trainBuf.byteLength / 2);
+    valData = new Uint16Array(valBuf.buffer, valBuf.byteOffset, valBuf.byteLength / 2);
+  }
 
   const backendDisplay = device === 'wasm' ? 'cpu (wasm)' : device;
+  console.log(`dataset: ${dataset}`);
   console.log(`model: ${modelName}`);
-  console.log(`num docs: ${docs.length}`);
   console.log(`backend: ${backendDisplay}`);
+  console.log(`train tokens: ${trainData.length.toLocaleString()}`);
+  console.log(`val tokens: ${valData.length.toLocaleString()}`);
 
   const trainOpts = { model: modelName, batchSize: parseInt(batch) };
   if (steps) trainOpts.steps = parseInt(steps);
+  if (prompt) trainOpts.prompt = prompt;
 
-  const gen = train(device, docs, trainOpts);
+  const gen = train(device, trainData, valData, tokenizer, trainOpts);
 
   const write = isDeno
     ? (s) => Deno.stdout.writeSync(new TextEncoder().encode(s))
@@ -195,9 +217,13 @@ async function main() {
       console.log(`batch size: ${event.batchSize}`);
       console.log(`num params: ${event.paramCount.toLocaleString()}`);
     } else if (event.type === 'step') {
-      write(`\rstep ${String(event.step).padStart(4)} / ${String(event.totalSteps).padStart(4)} | loss ${event.loss.toFixed(4)}`);
+      let line = `\rstep ${String(event.step).padStart(4)} / ${String(event.totalSteps).padStart(4)} | loss ${event.loss.toFixed(4)}`;
+      if (event.valLoss !== undefined) {
+        line += ` | val ${event.valLoss.toFixed(4)}`;
+      }
+      write(line);
     } else if (event.type === 'done') {
-      console.log('\n--- inference (new, hallucinated names) ---');
+      console.log('\n--- generated samples ---');
       event.samples.forEach((s, i) => console.log(`sample ${String(i + 1).padStart(2)}: ${s}`));
     }
   }

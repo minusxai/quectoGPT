@@ -125,16 +125,21 @@ export function loss(params, cfg, tokenOH, posOH, targetOH, seqLen, mask, batche
 }
 
 // --- Inference (sequential, no KV cache for simplicity) ---
+// opts.prompt: optional seed text to continue from
 export async function inference(params, cfg, tokenizer, rngKey, opts = {}) {
   const temperature = opts.temperature ?? 0.5;
   const numSamples = opts.numSamples ?? 20;
+  const prompt = opts.prompt ?? '';
   const samples = [];
+
+  // Encode prompt (if any) — remove trailing EOS so generation continues
+  const promptIds = prompt ? tokenizer.encode(prompt).slice(0, -1) : [tokenizer.BOS];
 
   const sampleKeys = random.split(rngKey, numSamples);
 
   for (let s = 0; s < numSamples; s++) {
     let sampleKey = sampleKeys.ref.slice(s);
-    let tokenIds = [tokenizer.BOS];
+    let tokenIds = [...promptIds];
     const generated = [];
 
     for (let pos = 0; pos < cfg.blockSize; pos++) {

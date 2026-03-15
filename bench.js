@@ -266,13 +266,13 @@ async function runBenchmarks() {
 }
 
 // --- End-to-end training benchmark ---
-async function runTrainingBench(backendName, docs, steps = 10) {
+async function runTrainingBench(backendName, trainData, valData, tokenizer, steps = 10) {
   console.log(`\n=== Training Benchmark (${backendName}, ${steps} steps) ===\n`);
   const { train } = await import('./train.js');
 
   const t0 = performance.now();
   const losses = [];
-  const gen = train(backendName, docs, { steps, model: 'nano' });
+  const gen = train(backendName, trainData, valData, tokenizer, { steps, model: 'nano' });
 
   for await (const event of gen) {
     if (event.type === 'step') losses.push(event.loss);
@@ -302,6 +302,25 @@ async function main() {
   const runCPU = args.includes('--cpu') || args.includes('--all') || args.length === 0;
   const runGPU = args.includes('--gpu') || args.includes('--all');
 
+  // Load tokenizer + binary data for training bench
+  async function loadTrainData() {
+    const { buildBPETokenizer } = await import('./bpe.js');
+    const tokJson = JSON.parse(await readTextFile('data/names.tok.json'));
+    const tokenizer = buildBPETokenizer(tokJson.merges);
+    let trainData, valData;
+    if (typeof Deno !== 'undefined') {
+      trainData = new Uint16Array(Deno.readFileSync('data/names.train.bin').buffer);
+      valData = new Uint16Array(Deno.readFileSync('data/names.val.bin').buffer);
+    } else {
+      const fs = await import('fs');
+      const tBuf = fs.readFileSync('data/names.train.bin');
+      const vBuf = fs.readFileSync('data/names.val.bin');
+      trainData = new Uint16Array(tBuf.buffer, tBuf.byteOffset, tBuf.byteLength / 2);
+      valData = new Uint16Array(vBuf.buffer, vBuf.byteOffset, vBuf.byteLength / 2);
+    }
+    return { trainData, valData, tokenizer };
+  }
+
   if (runCPU) {
     const devices = await init();
     defaultDevice('wasm');
@@ -309,9 +328,8 @@ async function main() {
     await runCorrectnessTests();
     await runBenchmarks();
 
-    const text = await readTextFile('input.txt');
-    const docs = text.split('\n').filter(l => l.trim());
-    await runTrainingBench('wasm', docs, 10);
+    const { trainData, valData, tokenizer } = await loadTrainData();
+    await runTrainingBench('wasm', trainData, valData, tokenizer, 10);
   }
 
   if (runGPU) {
@@ -324,9 +342,8 @@ async function main() {
       await runCorrectnessTests();
       await runBenchmarks();
 
-      const text = await readTextFile('input.txt');
-      const docs = text.split('\n').filter(l => l.trim());
-      await runTrainingBench('webgpu', docs, 10);
+      const { trainData, valData, tokenizer } = await loadTrainData();
+      await runTrainingBench('webgpu', trainData, valData, tokenizer, 10);
     } catch (e) {
       console.log(`\nWebGPU not available: ${e.message}`);
     }
