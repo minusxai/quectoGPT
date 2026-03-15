@@ -41,12 +41,13 @@ export async function initWebGPU() {
 
   function uniformBuf(uint32Values) {
     const data = new Uint32Array(uint32Values);
+    const size = Math.max(data.byteLength, 16); // min 16 bytes for uniform
     const buf = device.createBuffer({
-      size: Math.max(data.byteLength, 16), // min 16 bytes for uniform
+      size,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       mappedAtCreation: true,
     });
-    new Uint32Array(buf.getMappedRange().slice(0, data.byteLength)).set(data);
+    new Uint32Array(buf.getMappedRange()).set(data);
     buf.unmap();
     return buf;
   }

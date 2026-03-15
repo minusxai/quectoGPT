@@ -281,9 +281,10 @@ export async function* train(backend, docs, opts = {}) {
   yield { type: 'done', samples, tokenizer, stateDict };
 }
 
-// --- Node.js CLI entry point ---
+// --- CLI entry point (Node + Deno) ---
 async function main() {
-  const args = process.argv.slice(2);
+  const isDeno = typeof Deno !== 'undefined';
+  const args = isDeno ? Deno.args : process.argv.slice(2);
   const getArg = (name, def) => {
     const a = args.find(x => x.startsWith(`--${name}=`));
     return a ? a.split('=')[1] : def;
@@ -301,8 +302,9 @@ async function main() {
   }
 
   // Load data
-  const fs = await import('fs');
-  const text = fs.readFileSync('input.txt', 'utf-8');
+  const text = isDeno
+    ? Deno.readTextFileSync('input.txt')
+    : (await import('fs')).readFileSync('input.txt', 'utf-8');
   const docs = text.split('\n').filter(l => l.trim());
 
   console.log(`num docs: ${docs.length}`);
@@ -310,12 +312,16 @@ async function main() {
 
   const gen = train(backend, docs, { steps });
 
+  const write = isDeno
+    ? (s) => Deno.stdout.writeSync(new TextEncoder().encode(s))
+    : (s) => process.stdout.write(s);
+
   for await (const event of gen) {
     if (event.type === 'init') {
       console.log(`vocab size: ${event.vocabSize}`);
       console.log(`num params: ${event.paramCount}`);
     } else if (event.type === 'step') {
-      process.stdout.write(`\rstep ${String(event.step).padStart(4)} / ${String(event.totalSteps).padStart(4)} | loss ${event.loss.toFixed(4)}`);
+      write(`\rstep ${String(event.step).padStart(4)} / ${String(event.totalSteps).padStart(4)} | loss ${event.loss.toFixed(4)}`);
     } else if (event.type === 'done') {
       console.log('\n--- inference (new, hallucinated names) ---');
       event.samples.forEach((s, i) => console.log(`sample ${String(i + 1).padStart(2)}: ${s}`));
@@ -323,10 +329,12 @@ async function main() {
   }
 }
 
-// Run if executed directly in Node
+// Run if executed directly
+const isDeno = typeof Deno !== 'undefined';
 const isNode = typeof process !== 'undefined' && process.versions?.node;
-if (isNode) {
-  // Check if this is the main module
+if (isDeno) {
+  main().catch(console.error);
+} else if (isNode) {
   const url = await import('url');
   if (import.meta.url === url.pathToFileURL(process.argv[1]).href) {
     main().catch(console.error);

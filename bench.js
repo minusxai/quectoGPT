@@ -20,7 +20,7 @@ function relError(a, b) {
   return maxRel;
 }
 
-function timeIt(fn, warmup = 2, runs = 5) {
+function timeIt(fn, warmup = 10, runs = 100) {
   for (let i = 0; i < warmup; i++) fn();
   const times = [];
   for (let i = 0; i < runs; i++) {
@@ -287,9 +287,18 @@ async function runTrainingBench(backend, docs, steps = 10) {
   return { elapsed, losses };
 }
 
+// --- File reading (works in both Node and Deno) ---
+async function readTextFile(path) {
+  if (typeof Deno !== 'undefined') {
+    return Deno.readTextFileSync(path);
+  }
+  const fs = await import('fs');
+  return fs.readFileSync(path, 'utf-8');
+}
+
 // --- Main ---
 async function main() {
-  const args = process.argv.slice(2);
+  const args = typeof Deno !== 'undefined' ? Deno.args : process.argv.slice(2);
   const runCPU = args.includes('--cpu') || args.includes('--all') || args.length === 0;
   const runGPU = args.includes('--gpu') || args.includes('--all');
 
@@ -299,8 +308,7 @@ async function main() {
     await runCorrectnessTests(cpuBackend);
     runBenchmarks(cpuBackend);
 
-    const fs = await import('fs');
-    const text = fs.readFileSync('input.txt', 'utf-8');
+    const text = await readTextFile('input.txt');
     const docs = text.split('\n').filter(l => l.trim());
     await runTrainingBench(cpuBackend, docs, 10);
   }
@@ -313,8 +321,7 @@ async function main() {
       await runCorrectnessTests(gpuBackend);
       runBenchmarks(gpuBackend);
 
-      const fs = await import('fs');
-      const text = fs.readFileSync('input.txt', 'utf-8');
+      const text = await readTextFile('input.txt');
       const docs = text.split('\n').filter(l => l.trim());
       await runTrainingBench(gpuBackend, docs, 10);
     } catch (e) {
