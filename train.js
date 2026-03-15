@@ -51,6 +51,7 @@ function sampleBatch(tokenData, batchSize, blockSize, rng) {
 export async function* train(backendName, trainData, valData, tokenizer, opts = {}) {
   const modelName = opts.model ?? 'nano';
   const cfg = resolveConfig(modelName);
+  if (opts.blockSize) cfg.blockSize = opts.blockSize; // override context window
   const numSteps = opts.steps ?? cfg.steps;
   const batchSize = opts.batchSize ?? 8;
   const baseLR = opts.lr ?? cfg.lr;
@@ -127,9 +128,7 @@ export async function* train(backendName, trainData, valData, tokenizer, opts = 
         const vTargOH = nn.oneHot(vTarget, tokenizer.vocabSize);
         const vLoss = loss(tree.ref(params), cfg, vTokOH, vPosOH, vTargOH, seqLen, null, true);
         valLossSum += vLoss.item();
-        vTokOH.dispose();
-        vPosOH.dispose();
-        vTargOH.dispose();
+        // oneHot tensors are consumed by loss() — no manual dispose needed
       }
       event.valLoss = valLossSum / valBatches;
     }
@@ -163,6 +162,7 @@ async function main() {
   const backendArg = getArg('backend', 'cpu');
   const steps = getArg('steps', null);
   const batch = getArg('batch', '8');
+  const blocksize = getArg('blocksize', null);
   const prompt = getArg('prompt', null);
 
   // Initialize jax-js
@@ -203,6 +203,7 @@ async function main() {
 
   const trainOpts = { model: modelName, batchSize: parseInt(batch) };
   if (steps) trainOpts.steps = parseInt(steps);
+  if (blocksize) trainOpts.blockSize = parseInt(blocksize);
   if (prompt) trainOpts.prompt = prompt;
 
   const gen = train(device, trainData, valData, tokenizer, trainOpts);

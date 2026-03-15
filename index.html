@@ -460,8 +460,12 @@
       <div class="stat-value" id="stat-step">—</div>
     </div>
     <div class="stat-cell">
-      <div class="stat-label">Loss</div>
+      <div class="stat-label">Train Loss</div>
       <div class="stat-value loss" id="stat-loss">—</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">Val Loss</div>
+      <div class="stat-value" id="stat-val-loss" style="color:var(--red)">—</div>
     </div>
     <div class="stat-cell">
       <div class="stat-label">Steps/sec</div>
@@ -479,7 +483,7 @@
 
   <div class="chart-section">
     <div class="chart-wrap">
-      <span class="chart-label">loss / step &nbsp; <span style="color:var(--accent)">&#9644; train</span> &nbsp; <span style="color:var(--amber)">&#9644; val</span></span>
+      <span class="chart-label">loss / step &nbsp; <span style="color:var(--accent)">&#9644; train</span> &nbsp; <span style="color:var(--red)">&#9644; val</span></span>
       <canvas id="chart"></canvas>
     </div>
     <div class="chart-sidebar">
@@ -679,7 +683,7 @@ function drawChart() {
   if (valLossHistory.length >= 2) {
     ctx.save();
     ctx.beginPath();
-    ctx.strokeStyle = '#ffaa22';
+    ctx.strokeStyle = '#ff4444';
     ctx.lineWidth = 1.5;
     ctx.lineJoin = 'round';
     ctx.setLineDash([4, 3]);
@@ -746,6 +750,9 @@ function formatTime(ms) {
 function updateStats(data) {
   $('stat-step').textContent = `${data.step} / ${data.totalSteps}`;
   $('stat-loss').textContent = data.loss.toFixed(4);
+  if (data.valLoss !== undefined) {
+    $('stat-val-loss').textContent = data.valLoss.toFixed(4);
+  }
   $('progress').style.width = `${(data.step / data.totalSteps) * 100}%`;
 
   const bigEl = $('loss-big');

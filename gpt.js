@@ -170,7 +170,7 @@ export async function inference(params, cfg, tokenizer, rngKey, opts = {}) {
       tokenIds.push(chosenId);
     }
 
-    samples.push(tokenizer.decode(generated));
+    samples.push(prompt + tokenizer.decode(generated));
   }
 
   sampleKeys.dispose();
