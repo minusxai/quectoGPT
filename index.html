@@ -1410,7 +1410,9 @@ async function startFederatedTraining(initialWeights) {
     while (inSession && !abortFlag) {
       // Large step count so the round timer drives restarts, not the step limit.
       // seed: 0 ensures all clients initialize from identical weights on round 0.
-      const gen = train(device, trainData, valData, tokenizer, { model, handle: trainingHandle, initialWeights: currentInitialWeights, steps: 999999, seed: 0 });
+      const promptVal = $('input-prompt').value.trim();
+      const valEveryVal = parseInt($('input-valevery').value.trim()) || undefined;
+      const gen = train(device, trainData, valData, tokenizer, { model, handle: trainingHandle, initialWeights: currentInitialWeights, steps: 999999, seed: 0, ...(promptVal && { prompt: promptVal }), ...(valEveryVal && { valEvery: valEveryVal }) });
 
       for await (const event of gen) {
         if (!inSession || abortFlag) break;
