@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>quectoGPT</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Anybody:wght@800;900&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0a0a0c;
+    --bg-raised: #111114;
+    --bg-panel: #0d0d10;
+    --border: #1a1a22;
+    --border-glow: #22ff6622;
+    --text: #b8b8c0;
+    --text-dim: #55555f;
+    --text-bright: #e0e0e8;
+    --accent: #22ff66;
+    --accent-dim: #22ff6633;
+    --accent-mid: #22ff6688;
+    --red: #ff4444;
+    --amber: #ffaa22;
+    --trace: #22ff66;
+    --trace-shadow: #22ff6644;
+    --grid: #151520;
+    --scanline: rgba(255,255,255,0.015);
+  }
+
+  html { font-size: 14px; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* CRT scanline overlay */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      var(--scanline) 2px,
+      var(--scanline) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  .shell {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 1.5rem 2rem 3rem;
+  }
+
+  /* --- Header --- */
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 1.5rem;
+    padding-bottom: 1.2rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .logo {
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 600;
+    font-size: 1.4rem;
+    letter-spacing: -0.02em;
+    color: var(--text-bright);
+    line-height: 1;
+  }
+
+  .logo span {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .badges {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.72rem;
+    padding: 0.25rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    background: var(--bg-panel);
+  }
+
+  .badge.active {
+    border-color: var(--accent-dim);
+    color: var(--accent);
+  }
+
+  .badge .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-dim);
+  }
+
+  .badge.active .dot {
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* --- Stats Strip --- */
+  .stats-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+  }
+
+  .stat-cell {
+    background: var(--bg-panel);
+    padding: 0.75rem 1rem;
+  }
+
+  .stat-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    margin-bottom: 0.25rem;
+  }
+
+  .stat-value {
+    font-size: 1.1rem;
+    font-weight: 500;
+    color: var(--text-bright);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stat-value.loss {
+    color: var(--accent);
+    text-shadow: 0 0 12px var(--accent-dim);
+  }
+
+  /* --- Chart Area --- */
+  .chart-section {
+    display: grid;
+    grid-template-columns: 1fr 160px;
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+    background: var(--bg-panel);
+  }
+
+  .chart-wrap {
+    position: relative;
+    height: 320px;
+    border-right: 1px solid var(--border);
+  }
+
+  .chart-wrap canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .chart-label {
+    position: absolute;
+    top: 0.6rem;
+    left: 0.8rem;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+  }
+
+  .chart-sidebar {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 1.5rem;
+    gap: 0.4rem;
+  }
+
+  .loss-big-label {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+  }
+
+  .loss-big {
+    font-family: 'Anybody', sans-serif;
+    font-weight: 900;
+    font-size: 2.6rem;
+    color: var(--accent);
+    text-shadow: 0 0 40px var(--accent-dim), 0 0 8px var(--accent-mid);
+    line-height: 1;
+    letter-spacing: -0.03em;
+  }
+
+  .loss-big.idle {
+    color: var(--text-dim);
+    text-shadow: none;
+  }
+
+  .loss-delta {
+    font-size: 0.75rem;
+    color: var(--accent);
+  }
+
+  .loss-delta.up { color: var(--red); }
+
+  /* --- Controls --- */
+  .controls {
+    display: flex;
+    gap: 0.6rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .btn {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.78rem;
+    font-weight: 500;
+    padding: 0.55rem 1.2rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg-panel);
+    color: var(--text);
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    transition: all 0.15s;
+  }
+
+  .btn:hover {
+    border-color: var(--accent-dim);
+    color: var(--text-bright);
+  }
+
+  .btn.primary {
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+
+  .btn.primary:hover {
+    background: #33ff77;
+    box-shadow: 0 0 20px var(--accent-dim);
+  }
+
+  .btn.danger {
+    border-color: #ff444444;
+    color: var(--red);
+  }
+
+  .btn.danger:hover {
+    border-color: var(--red);
+    background: #ff444411;
+  }
+
+  .btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-left: auto;
+  }
+
+  .control-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+  }
+
+  .input-field {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.78rem;
+    padding: 0.45rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg);
+    color: var(--text-bright);
+    width: 80px;
+    text-align: right;
+  }
+
+  .input-field:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+  }
+
+  /* Toggle */
+  .toggle-wrap {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .toggle-opt {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.7rem;
+    padding: 0.45rem 0.8rem;
+    background: var(--bg-panel);
+    color: var(--text-dim);
+    border: none;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    transition: all 0.15s;
+  }
+
+  .toggle-opt + .toggle-opt { border-left: 1px solid var(--border); }
+
+  .toggle-opt.selected {
+    background: var(--accent);
+    color: var(--bg);
+    font-weight: 600;
+  }
+
+  .toggle-opt:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* --- Samples Panel --- */
+  .samples-section {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .samples-header {
+    padding: 0.7rem 1rem;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+  }
+
+  .samples-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 1px;
+    background: var(--border);
+  }
+
+  .sample-item {
+    background: var(--bg-panel);
+    padding: 0.6rem 0.8rem;
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+
+  .sample-idx {
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    min-width: 1.6rem;
+  }
+
+  .sample-text {
+    color: var(--text-bright);
+    font-size: 0.85rem;
+    font-weight: 400;
+  }
+
+  .samples-empty {
+    padding: 2rem;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    background: var(--bg-panel);
+  }
+
+  /* --- Progress bar --- */
+  .progress-wrap {
+    height: 2px;
+    background: var(--border);
+    border-radius: 1px;
+    margin-bottom: 1.5rem;
+    overflow: hidden;
+  }
+
+  .progress-bar {
+    height: 100%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent-mid);
+    width: 0%;
+    transition: width 0.1s linear;
+  }
+
+  /* --- Responsive --- */
+  @media (max-width: 700px) {
+    .shell { padding: 1rem; }
+    .chart-section { grid-template-columns: 1fr; }
+    .chart-sidebar { border-top: 1px solid var(--border); flex-direction: row; padding: 1rem; }
+    .chart-wrap { height: 240px; border-right: none; }
+    .control-group { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <header>
+    <div class="logo">quecto<span>GPT</span></div>
+    <div class="badges">
+      <div class="badge" id="badge-backend"><span class="dot"></span>CPU</div>
+      <div class="badge" id="badge-params"><span class="dot"></span>— params</div>
+      <div class="badge" id="badge-vocab"><span class="dot"></span>vocab —</div>
+    </div>
+  </header>
+
+  <div class="progress-wrap"><div class="progress-bar" id="progress"></div></div>
+
+  <div class="stats-strip">
+    <div class="stat-cell">
+      <div class="stat-label">Step</div>
+      <div class="stat-value" id="stat-step">—</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">Loss</div>
+      <div class="stat-value loss" id="stat-loss">—</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">Steps/sec</div>
+      <div class="stat-value" id="stat-speed">—</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">Elapsed</div>
+      <div class="stat-value" id="stat-elapsed">—</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">Status</div>
+      <div class="stat-value" id="stat-status">idle</div>
+    </div>
+  </div>
+
+  <div class="chart-section">
+    <div class="chart-wrap">
+      <span class="chart-label">loss / step</span>
+      <canvas id="chart"></canvas>
+    </div>
+    <div class="chart-sidebar">
+      <div class="loss-big-label">current loss</div>
+      <div class="loss-big idle" id="loss-big">—</div>
+      <div class="loss-delta" id="loss-delta">&nbsp;</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="btn primary" id="btn-start">Start Training</button>
+    <button class="btn danger" id="btn-stop" disabled>Stop</button>
+
+    <div class="control-group">
+      <span class="control-label">Backend</span>
+      <div class="toggle-wrap">
+        <button class="toggle-opt selected" id="tog-cpu">CPU</button>
+        <button class="toggle-opt" id="tog-gpu" disabled>WebGPU</button>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <span class="control-label">Steps</span>
+      <input type="number" class="input-field" id="input-steps" value="100" min="1" max="10000">
+    </div>
+  </div>
+
+  <div class="samples-section">
+    <div class="samples-header">Generated Samples</div>
+    <div id="samples-body">
+      <div class="samples-empty">Train the model to generate names</div>
+    </div>
+  </div>
+
+</div>
+
+<script type="module">
+import { train } from './train.js';
+import { initCPU } from './quectrograd/backend_cpu.js';
+
+// --- State ---
+let running = false;
+let abortFlag = false;
+let lossHistory = [];
+let selectedBackend = 'cpu';
+let hasWebGPU = false;
+
+// --- DOM refs ---
+const $ = id => document.getElementById(id);
+const chart = $('chart');
+const ctx = chart.getContext('2d');
+
+// --- WebGPU detection ---
+(async () => {
+  if (navigator.gpu) {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (adapter) {
+        hasWebGPU = true;
+        $('tog-gpu').disabled = false;
+      }
+    } catch {}
+  }
+})();
+
+// --- Backend toggle ---
+$('tog-cpu').onclick = () => {
+  if (running) return;
+  selectedBackend = 'cpu';
+  $('tog-cpu').classList.add('selected');
+  $('tog-gpu').classList.remove('selected');
+};
+$('tog-gpu').onclick = () => {
+  if (running || !hasWebGPU) return;
+  selectedBackend = 'gpu';
+  $('tog-gpu').classList.add('selected');
+  $('tog-cpu').classList.remove('selected');
+};
+
+// --- Chart rendering ---
+function drawChart() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = chart.parentElement.getBoundingClientRect();
+  chart.width = rect.width * dpr;
+  chart.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width;
+  const H = rect.height;
+
+  // Background
+  ctx.fillStyle = '#0d0d10';
+  ctx.fillRect(0, 0, W, H);
+
+  if (lossHistory.length < 2) {
+    // Empty state grid
+    drawGrid(W, H, 0, 4, 0, 100);
+    return;
+  }
+
+  const pad = { top: 28, right: 16, bottom: 28, left: 48 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  let minL = Infinity, maxL = -Infinity;
+  for (const v of lossHistory) {
+    if (v < minL) minL = v;
+    if (v > maxL) maxL = v;
+  }
+  // Add 10% padding
+  const range = maxL - minL || 1;
+  minL -= range * 0.05;
+  maxL += range * 0.05;
+
+  // Grid
+  drawGrid(W, H, minL, maxL, 0, lossHistory.length - 1, pad);
+
+  // Trace glow (wider, dimmer pass)
+  ctx.save();
+  ctx.beginPath();
+  ctx.strokeStyle = 'rgba(34, 255, 102, 0.15)';
+  ctx.lineWidth = 6;
+  ctx.lineJoin = 'round';
+  for (let i = 0; i < lossHistory.length; i++) {
+    const x = pad.left + (i / (lossHistory.length - 1)) * plotW;
+    const y = pad.top + (1 - (lossHistory[i] - minL) / (maxL - minL)) * plotH;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  // Trace line
+  ctx.save();
+  ctx.beginPath();
+  ctx.strokeStyle = '#22ff66';
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round';
+  ctx.shadowColor = '#22ff66';
+  ctx.shadowBlur = 4;
+  for (let i = 0; i < lossHistory.length; i++) {
+    const x = pad.left + (i / (lossHistory.length - 1)) * plotW;
+    const y = pad.top + (1 - (lossHistory[i] - minL) / (maxL - minL)) * plotH;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  // Current point dot
+  const lastX = pad.left + plotW;
+  const lastY = pad.top + (1 - (lossHistory[lossHistory.length - 1] - minL) / (maxL - minL)) * plotH;
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
+  ctx.fillStyle = '#22ff66';
+  ctx.shadowColor = '#22ff66';
+  ctx.shadowBlur = 10;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+}
+
+function drawGrid(W, H, minY, maxY, minX, maxX, pad) {
+  pad = pad || { top: 28, right: 16, bottom: 28, left: 48 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  ctx.strokeStyle = '#151520';
+  ctx.lineWidth = 0.5;
+
+  // Horizontal grid lines (5 lines)
+  const nH = 5;
+  ctx.font = '10px "IBM Plex Mono"';
+  ctx.fillStyle = '#55555f';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i <= nH; i++) {
+    const y = pad.top + (i / nH) * plotH;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + plotW, y);
+    ctx.stroke();
+    const val = maxY - (i / nH) * (maxY - minY);
+    ctx.fillText(val.toFixed(2), pad.left - 6, y);
+  }
+
+  // Vertical grid lines
+  const nV = 5;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let i = 0; i <= nV; i++) {
+    const x = pad.left + (i / nV) * plotW;
+    ctx.beginPath();
+    ctx.moveTo(x, pad.top);
+    ctx.lineTo(x, pad.top + plotH);
+    ctx.stroke();
+    const val = Math.round(minX + (i / nV) * (maxX - minX));
+    ctx.fillText(val, x, pad.top + plotH + 6);
+  }
+}
+
+// --- UI update ---
+function formatTime(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+function updateStats(data) {
+  $('stat-step').textContent = `${data.step} / ${data.totalSteps}`;
+  $('stat-loss').textContent = data.loss.toFixed(4);
+  $('progress').style.width = `${(data.step / data.totalSteps) * 100}%`;
+
+  const bigEl = $('loss-big');
+  bigEl.textContent = data.loss.toFixed(2);
+  bigEl.classList.remove('idle');
+
+  if (lossHistory.length >= 2) {
+    const prev = lossHistory[lossHistory.length - 2];
+    const delta = data.loss - prev;
+    const deltaEl = $('loss-delta');
+    deltaEl.textContent = (delta < 0 ? '' : '+') + delta.toFixed(4);
+    deltaEl.classList.toggle('up', delta > 0);
+  }
+}
+
+function showSamples(samples) {
+  const body = $('samples-body');
+  if (!samples || samples.length === 0) {
+    body.innerHTML = '<div class="samples-empty">No samples generated</div>';
+    return;
+  }
+  body.innerHTML = '<div class="samples-grid">' + samples.map((s, i) =>
+    `<div class="sample-item">
+      <span class="sample-idx">${String(i + 1).padStart(2, '0')}</span>
+      <span class="sample-text">${escHtml(s)}</span>
+    </div>`
+  ).join('') + '</div>';
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// --- Training ---
+$('btn-start').onclick = async () => {
+  if (running) return;
+  running = true;
+  abortFlag = false;
+  lossHistory = [];
+
+  $('btn-start').disabled = true;
+  $('btn-stop').disabled = false;
+  $('tog-cpu').disabled = true;
+  $('tog-gpu').disabled = true;
+  $('stat-status').textContent = 'loading data…';
+  $('samples-body').innerHTML = '<div class="samples-empty">Training in progress…</div>';
+
+  try {
+    // Load data
+    const resp = await fetch('input.txt');
+    const text = await resp.text();
+    const docs = text.split('\n').filter(l => l.trim());
+
+    // Init backend
+    let backend;
+    if (selectedBackend === 'gpu') {
+      const { initWebGPU } = await import('./quectrograd/backend_webgpu.js');
+      backend = await initWebGPU();
+    } else {
+      backend = initCPU();
+    }
+
+    const steps = parseInt($('input-steps').value) || 100;
+    const gen = train(backend, docs, { steps });
+
+    const t0 = performance.now();
+    let stepCount = 0;
+
+    $('stat-status').textContent = 'training';
+
+    for await (const event of gen) {
+      if (abortFlag) break;
+
+      if (event.type === 'init') {
+        const bBadge = $('badge-backend');
+        bBadge.querySelector('.dot');
+        bBadge.textContent = '';
+        bBadge.innerHTML = `<span class="dot"></span>${event.backend.toUpperCase()}`;
+        bBadge.classList.add('active');
+
+        $('badge-params').innerHTML = `<span class="dot"></span>${event.paramCount.toLocaleString()} params`;
+        $('badge-vocab').innerHTML = `<span class="dot"></span>vocab ${event.vocabSize}`;
+      }
+
+      if (event.type === 'step') {
+        stepCount++;
+        lossHistory.push(event.loss);
+        updateStats(event);
+
+        const elapsed = performance.now() - t0;
+        $('stat-elapsed').textContent = formatTime(elapsed);
+        $('stat-speed').textContent = (stepCount / (elapsed / 1000)).toFixed(1);
+
+        // Redraw chart at ~30fps max
+        if (stepCount % Math.max(1, Math.floor(steps / 300)) === 0 || stepCount === steps) {
+          drawChart();
+        }
+
+        // Yield to UI
+        if (stepCount % 2 === 0) {
+          await new Promise(r => requestAnimationFrame(r));
+        }
+      }
+
+      if (event.type === 'done') {
+        $('stat-status').textContent = 'done';
+        showSamples(event.samples);
+        drawChart();
+      }
+    }
+
+    if (abortFlag) {
+      $('stat-status').textContent = 'stopped';
+      drawChart();
+    }
+
+  } catch (err) {
+    $('stat-status').textContent = 'error';
+    console.error(err);
+    $('samples-body').innerHTML = `<div class="samples-empty" style="color:var(--red)">${escHtml(err.message)}</div>`;
+  }
+
+  running = false;
+  $('btn-start').disabled = false;
+  $('btn-stop').disabled = true;
+  $('tog-cpu').disabled = false;
+  $('tog-gpu').disabled = !hasWebGPU;
+};
+
+$('btn-stop').onclick = () => { abortFlag = true; };
+
+// Initial chart draw
+requestAnimationFrame(() => drawChart());
+window.addEventListener('resize', () => drawChart());
+</script>
+</body>
+</html>
