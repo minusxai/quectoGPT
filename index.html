@@ -530,6 +530,11 @@
     </div>
 
     <div class="control-group">
+      <span class="control-label">Val every</span>
+      <input type="number" class="input-field" id="input-valevery" value="" min="1" max="50000" placeholder="auto">
+    </div>
+
+    <div class="control-group">
       <span class="control-label">Prompt</span>
       <input type="text" class="input-field" id="input-prompt" value="" placeholder="(optional)" style="width:140px;text-align:left">
     </div>
@@ -768,18 +773,34 @@ function updateStats(data) {
   }
 }
 
-function showSamples(samples) {
+function showSamples(samples, step) {
   const body = $('samples-body');
-  if (!samples || samples.length === 0) {
-    body.innerHTML = '<div class="samples-empty">No samples generated</div>';
-    return;
-  }
-  body.innerHTML = '<div class="samples-grid">' + samples.map((s, i) =>
+  if (!samples || samples.length === 0) return;
+
+  // Clear placeholder
+  const empty = body.querySelector('.samples-empty');
+  if (empty) empty.remove();
+
+  const block = document.createElement('div');
+  block.style.borderBottom = '1px solid var(--border)';
+
+  const header = document.createElement('div');
+  header.style.cssText = 'padding:0.5rem 1rem;font-size:0.6rem;text-transform:uppercase;letter-spacing:0.1em;color:var(--text-dim);background:var(--bg);border-bottom:1px solid #111116;';
+  header.textContent = step != null ? `step ${step}` : 'final';
+  block.appendChild(header);
+
+  const grid = document.createElement('div');
+  grid.className = 'samples-grid';
+  grid.innerHTML = samples.map((s, i) =>
     `<div class="sample-item">
       <span class="sample-idx">${String(i + 1).padStart(2, '0')}</span>
-      <span class="sample-text">${escHtml(s)}</span>
+      <span class="sample-text">${escHtml(s) || '<empty>'}</span>
     </div>`
-  ).join('') + '</div>';
+  ).join('');
+  block.appendChild(grid);
+
+  // Prepend — newest on top
+  body.insertBefore(block, body.firstChild);
 }
 
 function escHtml(s) {
@@ -823,9 +844,11 @@ $('btn-start').onclick = async () => {
 
     const model = $('input-model').value;
     const stepsVal = $('input-steps').value.trim();
+    const valEveryVal = $('input-valevery').value.trim();
     const promptVal = $('input-prompt').value.trim();
     const trainOpts = { model };
     if (stepsVal) trainOpts.steps = parseInt(stepsVal);
+    if (valEveryVal) trainOpts.valEvery = parseInt(valEveryVal);
     if (promptVal) trainOpts.prompt = promptVal;
     const gen = train(device, trainData, valData, tokenizer, trainOpts);
 
@@ -854,6 +877,9 @@ $('btn-start').onclick = async () => {
         if (event.valLoss !== undefined) {
           valLossHistory.push({ step: stepCount - 1, loss: event.valLoss });
         }
+        if (event.samples) {
+          showSamples(event.samples, event.step);
+        }
         updateStats(event);
 
         const elapsed = performance.now() - t0;
@@ -873,7 +899,7 @@ $('btn-start').onclick = async () => {
 
       if (event.type === 'done') {
         $('stat-status').textContent = 'done';
-        showSamples(event.samples);
+        showSamples(event.samples, null);
         drawChart();
       }
     }

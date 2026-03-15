@@ -142,7 +142,8 @@ export async function inference(params, cfg, tokenizer, rngKey, opts = {}) {
     let tokenIds = [...promptIds];
     const generated = [];
 
-    for (let pos = 0; pos < cfg.blockSize; pos++) {
+    const maxLen = cfg.blockSize;
+    for (let pos = 0; pos < maxLen && tokenIds.length < maxLen; pos++) {
       const seqLen = tokenIds.length;
       const inputIds = np.array(new Int32Array(tokenIds), { dtype: np.int32 });
       const posIds = np.arange(seqLen).astype(np.int32);

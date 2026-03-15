@@ -56,7 +56,7 @@ export async function* train(backendName, trainData, valData, tokenizer, opts = 
   const batchSize = opts.batchSize ?? 8;
   const baseLR = opts.lr ?? cfg.lr;
   const seed = opts.seed ?? 42;
-  const valEvery = opts.valEvery ?? Math.max(1, Math.floor(numSteps / 20)); // ~20 val evals
+  const valEvery = opts.valEvery ?? Math.max(10, Math.floor(numSteps / 20)); // ~20 val evals, min every 10 steps
   const valBatches = opts.valBatches ?? 4; // average val loss over this many batches
   const jsRng = mulberry32(seed);
   const valRng = mulberry32(seed + 999);
@@ -131,6 +131,12 @@ export async function* train(backendName, trainData, valData, tokenizer, opts = 
         // oneHot tensors are consumed by loss() — no manual dispose needed
       }
       event.valLoss = valLossSum / valBatches;
+
+      // Generate samples at each val eval
+      const sampleKey = random.key(seed + step + 100);
+      const sampleOpts = { temperature: opts.temperature ?? 0.8, numSamples: 10 };
+      if (opts.prompt) sampleOpts.prompt = opts.prompt;
+      event.samples = await inference(params, cfg, tokenizer, sampleKey, sampleOpts);
     }
 
     yield event;
@@ -163,6 +169,7 @@ async function main() {
   const steps = getArg('steps', null);
   const batch = getArg('batch', '8');
   const blocksize = getArg('blocksize', null);
+  const valevery = getArg('valevery', null);
   const prompt = getArg('prompt', null);
 
   // Initialize jax-js
@@ -204,6 +211,7 @@ async function main() {
   const trainOpts = { model: modelName, batchSize: parseInt(batch) };
   if (steps) trainOpts.steps = parseInt(steps);
   if (blocksize) trainOpts.blockSize = parseInt(blocksize);
+  if (valevery) trainOpts.valEvery = parseInt(valevery);
   if (prompt) trainOpts.prompt = prompt;
 
   const gen = train(device, trainData, valData, tokenizer, trainOpts);
