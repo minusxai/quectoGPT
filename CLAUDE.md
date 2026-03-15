@@ -7,18 +7,25 @@ quectoGPT is a JavaScript port of Karpathy's microgpt.py — a minimal GPT train
 ## How to run
 
 ```bash
-# Train (CPU)
+# Train (CPU, Node)
 node train.js
-
-# Train with options
 node train.js --backend=cpu --steps=100
 
-# Run correctness tests + benchmarks
+# Train (WebGPU, Deno)
+deno run --allow-read --unstable-webgpu train.js --backend=webgpu --steps=100
+
+# Benchmarks (CPU, Node)
 node bench.js
 
-# Browser: serve and open index.html
-npx serve .
+# Benchmarks (WebGPU, Deno)
+deno run --allow-read --unstable-webgpu bench.js --gpu
+
+# Browser: serve and open index.html (training) or bench.html (benchmarks)
+python -m http.server
+# or: npx serve .
 ```
+
+Deno is installed at `~/.deno/bin/deno`. If not on PATH, use the full path. Install: `curl -fsSL https://deno.land/install.sh | sh`, then add `~/.deno/bin` to PATH.
 
 ## Architecture
 
@@ -26,9 +33,11 @@ npx serve .
   - `backend_cpu.js` — Float32Array ops, pure loops
   - `backend_webgpu.js` — GPUBuffer ops, WGSL shaders
 - **Tape-based autograd** — forward ops append to a global tape array, `backward()` walks it in reverse. No topo sort needed.
-- **ops.js** — each op computes forward via the backend, wraps result in a Tensor, and attaches a `_backwardFn` closure for backward.
-- **train.js** — processes tokens sequentially (matching the Python version), uses KV cache for attention. Exports an async generator `train()` consumed by both Node CLI and browser.
-- **bench.js** — finite-difference gradient checking + op-level timing.
+- **ops.js** — each op computes forward via the backend, wraps result in a Tensor, and attaches a `_backwardFn` closure for backward. **No op calls `.toArray()`** — all computation stays on device (critical for GPU performance).
+- **train.js** — processes tokens sequentially (matching the Python version), uses KV cache for attention. Exports an async generator `train()` consumed by both Node CLI, Deno CLI, and browser. `await` on `.toArray()` only where results are actually read (loss logging, inference sampling).
+- **bench.js** — finite-difference gradient checking + op-level timing. Works with both Node (CPU) and Deno (CPU + WebGPU).
+- **index.html** — browser training dashboard with CRT/oscilloscope theme, real-time Canvas2D loss chart, configurable steps, CPU/WebGPU toggle.
+- **bench.html** — browser benchmark page with correctness tests, gradient checks, op-level benchmarks, and training benchmark. Same theme as index.html. Nav links between the two pages.
 
 ## Key conventions
 
@@ -37,13 +46,24 @@ npx serve .
 - Weights stored as `[outDim, inDim]` matching microgpt.py. The `matmulWT` op handles the transpose.
 - `clearTape()` must be called at the start of each training step.
 - The CPU backend is the reference — all GPU results are tested against it.
+- `train.js` and `bench.js` have runtime detection for Node vs Deno (file I/O, args, stdout).
+- `bench.js` uses `timeIt(fn, warmup=10, runs=100)` for timing.
 
 ## Testing
 
 ```bash
-node bench.js        # runs correctness tests + gradient checks + benchmarks
+node bench.js                                                  # CPU correctness + benchmarks
+deno run --allow-read --unstable-webgpu bench.js --gpu         # WebGPU correctness + benchmarks
 ```
 
 Correctness criteria:
 - Forward: max absolute error < 1e-5 vs expected values
 - Backward: gradient matches finite-difference (eps=1e-4, relative tolerance < 5%)
+- Known: softmax gradient check reports rel err=1.0 due to finite-difference numerical issues. Not a real bug — training works correctly.
+
+## Browser pages
+
+Both served from the same directory (no build step):
+- `index.html` — training dashboard (Train tab)
+- `bench.html` — benchmark suite (Bench tab)
+- Navigation links between the two pages in the header

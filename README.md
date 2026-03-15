@@ -12,6 +12,7 @@ A port of Karpathy's [microgpt.py](https://github.com/karpathy/microgpt) from sc
 - **train.js** — GPT model definition + training loop (works with either backend)
 - **bench.js** — correctness tests + CPU vs WebGPU benchmarks
 - **index.html** — browser training dashboard with real-time loss chart
+- **bench.html** — browser benchmark page (correctness tests, gradient checks, op timing, training bench)
 
 ## Architecture
 
@@ -28,8 +29,9 @@ quectoGPT/
     optim.js          — Adam optimizer
     index.js          — public API
   train.js            — GPT model + training loop
-  bench.js            — correctness tests + benchmarks
+  bench.js            — correctness tests + benchmarks (CLI)
   index.html          — browser training dashboard
+  bench.html          — browser benchmark page
   input.txt           — training data (names dataset)
 ```
 
@@ -39,30 +41,45 @@ quectoGPT/
 
 ```bash
 node train.js
-```
-
-Options:
-```bash
 node train.js --backend=cpu --steps=100
 ```
 
-### Benchmarks
+### Deno (WebGPU)
+
+Deno has built-in WebGPU support — this is the easiest way to run GPU from the CLI:
 
 ```bash
-node bench.js           # CPU correctness + benchmarks
-node bench.js --gpu     # also test WebGPU (requires Node 22+ with --experimental-webgpu)
+# Train on GPU
+deno run --allow-read --unstable-webgpu train.js --backend=webgpu --steps=100
+
+# GPU benchmarks
+deno run --allow-read --unstable-webgpu bench.js --gpu
+
+# CPU benchmarks
+deno run --allow-read bench.js --cpu
+```
+
+### Benchmarks (Node)
+
+```bash
+node bench.js           # CPU correctness + benchmarks (default)
+node bench.js --cpu     # explicit CPU
+node bench.js --all     # CPU + GPU (GPU needs Deno, see above)
 ```
 
 ### Browser
 
-Serve the directory and open `index.html`:
+Serve the directory and open `index.html` or `bench.html`:
 ```bash
 npx serve .
+# or
+python -m http.server
 ```
 
-Or any static file server. No build step — pure ES modules.
+No build step — pure ES modules.
 
-The dashboard auto-detects WebGPU. You'll see a real-time loss chart as the model trains on names, then generated samples when done.
+- **index.html** — training dashboard with real-time loss chart. Auto-detects WebGPU. Configurable steps + backend toggle.
+- **bench.html** — runs correctness tests, gradient checks, op-level benchmarks, and a training benchmark in-browser. Supports CPU and WebGPU backends.
 
 ## Model
 
@@ -78,6 +95,6 @@ Same architecture as microgpt.py — a tiny GPT-2 variant:
 ## Requirements
 
 - **Node.js 18+** for CPU backend
-- **Node.js 22+** with `--experimental-webgpu` for WebGPU backend
-- **Any modern browser** with WebGPU support (Chrome 113+, Edge 113+, Firefox Nightly) for GPU in browser
+- **Deno** for WebGPU from CLI (`curl -fsSL https://deno.land/install.sh | sh`)
+- **Any modern browser** with WebGPU support (Chrome 113+, Edge 113+) for GPU in browser
 - No npm dependencies. Zero. Just JS files.
