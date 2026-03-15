@@ -2,38 +2,37 @@
 
 The most atomic way to train a GPT — now in JavaScript with WebGPU acceleration.
 
-A port of Karpathy's [microgpt.py](https://github.com/karpathy/microgpt) from scalar autograd to **tensor-level autograd**, with a custom tensor library (`quectrograd`) that runs on both CPU (pure JS) and WebGPU (WGSL compute shaders).
+A port of Karpathy's [microgpt.py](https://github.com/karpathy/microgpt) using [jax-js](https://github.com/ekzhang/jax-js) (`@jax-js/jax` + `@jax-js/optax`) — a production-grade ML library with JAX API, WebGPU/Wasm backends, built-in `grad()`, `jit()`, and optimizers.
 
 ## What this is
 
-- **quectrograd/** — a minimal tensor autograd library with two backends:
-  - `backend_cpu.js` — pure JS, no dependencies, works everywhere
-  - `backend_webgpu.js` — WebGPU accelerated via WGSL compute shaders
-- **train.js** — GPT model definition + training loop (works with either backend)
-- **bench.js** — correctness tests + CPU vs WebGPU benchmarks
+- **gpt.js** — GPT model definition: config, param init, forward, loss, inference (pure functions)
+- **train.js** — training loop with `valueAndGrad` + optax `adam`
+- **bench.js** — correctness tests + benchmarks using jax-js ops + `grad()`
 - **index.html** — browser training dashboard with real-time loss chart
 - **bench.html** — browser benchmark page (correctness tests, gradient checks, op timing, training bench)
 
 ## Architecture
 
-The key shift from the Python version: each `Value` node held a single float. Here, each `Tensor` holds a `Float32Array` (CPU) or `GPUBuffer` (WebGPU), and ops dispatch at the tensor level. Autograd uses a **tape** (flat array) instead of graph traversal — forward ops append to the tape, backward walks it in reverse.
+The model (`gpt.js`) is a collection of pure functions operating on a params pytree:
 
 ```
 quectoGPT/
-  quectrograd/
-    backend_cpu.js    — pure JS backend (reference implementation)
-    backend_webgpu.js — WebGPU backend (WGSL shaders inline)
-    tensor.js         — Tensor class
-    ops.js            — forward+backward op wrappers
-    autograd.js       — tape-based backward pass
-    optim.js          — Adam optimizer
-    index.js          — public API
-  train.js            — GPT model + training loop
-  bench.js            — correctness tests + benchmarks (CLI)
-  index.html          — browser training dashboard
-  bench.html          — browser benchmark page
-  input.txt           — training data (names dataset)
+  node_modules/         — @jax-js/jax + @jax-js/optax
+  gpt.js                — model: configs, initParams, forward, loss, inference
+  train.js              — training loop: tokenizer, valueAndGrad, adam optimizer
+  bench.js              — correctness tests + benchmarks (CLI)
+  index.html            — browser training dashboard
+  bench.html            — browser benchmark page
+  input.txt             — training data (names dataset)
 ```
+
+Key patterns:
+- **`valueAndGrad`** computes loss and gradients in one call
+- **optax `adam`** with LR schedule (warmup → constant → linear decay)
+- **`nn.dotProductAttention`** with `isCausal: true` — no manual per-head loop
+- **Reference counting** via `.ref` for arrays consumed by multiple ops
+- Params stored as nested pytree `{ wte, wpe, lmHead, layers: [{wq, wk, wv, wo, mlpFc1, mlpFc2}, ...] }`
 
 ## Model configs
 
@@ -51,7 +50,7 @@ All configs: char-level tokenizer (27 tokens: a-z + BOS), RMSNorm, ReLU, no bias
 
 ## Quick start
 
-### Node.js (CPU)
+### Node.js (CPU via Wasm)
 
 ```bash
 node train.js                                    # nano, 100 steps
@@ -68,14 +67,14 @@ Deno has built-in WebGPU support — the easiest way to run GPU from CLI:
 curl -fsSL https://deno.land/install.sh | sh
 
 # Train on GPU
-deno run --allow-read --unstable-webgpu train.js --backend=webgpu --model=small
-deno run --allow-read --unstable-webgpu train.js --backend=webgpu --model=medium --steps=100
+deno run --allow-read --allow-net --unstable-webgpu train.js --backend=webgpu --model=small
+deno run --allow-read --allow-net --unstable-webgpu train.js --backend=webgpu --model=medium --steps=100
 
 # GPU benchmarks
-deno run --allow-read --unstable-webgpu bench.js --gpu
+deno run --allow-read --allow-net --unstable-webgpu bench.js --gpu
 
 # CPU benchmarks
-deno run --allow-read bench.js --cpu
+deno run --allow-read --allow-net bench.js --cpu
 ```
 
 ### Benchmarks (Node)
@@ -96,26 +95,11 @@ python -m http.server
 No build step — pure ES modules.
 
 - **index.html** — training dashboard with real-time loss chart. Auto-detects WebGPU. Model size selector (nano through large), configurable steps, backend toggle.
-- **bench.html** — correctness tests, gradient checks, op-level benchmarks, training benchmark. Supports CPU and WebGPU.
-
-## Performance
-
-GPU speedup grows with model size (approximate, Deno CLI on Apple M-series):
-
-| Model | Params | CPU ms/step | GPU ms/step | Speedup |
-|-------|--------|-------------|-------------|---------|
-| small | 800K | 45 | 57 | ~1x |
-| medium | 4.8M | 258 | 126 | **2x** |
-| large | 25M | 1,380 | 245 | **5.6x** |
-
-Key optimizations:
-- **Batched sequence processing**: training forward pass processes all tokens at once as `[seqLen, embd]` matrices with causal masking, instead of one-at-a-time with KV cache
-- **GPU command batching**: ops accumulate in a shared `CommandEncoder`, flushed only on readback
-- **Buffer pooling**: uniform and ids buffers reused across training steps
+- **bench.html** — correctness tests, gradient checks, op-level benchmarks, training benchmark. Supports CPU (Wasm) and WebGPU.
 
 ## Requirements
 
-- **Node.js 18+** for CPU backend
+- **Node.js 18+** for CPU (Wasm) backend
 - **Deno** for WebGPU from CLI (`curl -fsSL https://deno.land/install.sh | sh`)
 - **Any modern browser** with WebGPU support (Chrome 113+, Edge 113+) for GPU in browser
-- No npm dependencies. Zero. Just JS files.
+- npm dependencies: `@jax-js/jax` and `@jax-js/optax` (`npm install`). Browser uses esm.sh CDN.
