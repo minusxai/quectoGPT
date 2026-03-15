@@ -45,13 +45,13 @@ function flattenParams(params) {
 
 function loadWeights(flat, templateParams) {
   let offset = 0;
-  return tree.map(templateParams, leaf => {
+  return tree.map(leaf => {
     const chunk = flat.slice(offset, offset + leaf.size);
     offset += leaf.size;
     const newLeaf = np.array(chunk).reshape(leaf.shape);
     leaf.dispose();
     return newLeaf;
-  });
+  }, templateParams);
 }
 
 // --- Sample a batch of random windows from token data ---
