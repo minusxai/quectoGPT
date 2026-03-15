@@ -1255,8 +1255,9 @@ function handleWsMessage(msg) {
     updateRoundStatus();
     drawSessChart();
     $('banner-submit').hidden = true;
-    // Signal training loop to restart with new global weights
-    if (msg.payload.weights?.length > 0) {
+    // Signal training loop to restart with new global weights.
+    // Only on genuine round completions (avg_loss != null), not on initial join update.
+    if (msg.payload.avg_loss != null && msg.payload.weights?.length > 0) {
       newRoundWeights = msg.payload.weights;
     }
   }
@@ -1360,7 +1361,9 @@ async function startFederatedTraining(initialWeights) {
     $('stat-status').textContent = 'training';
 
     while (inSession && !abortFlag) {
-      const gen = train(device, docs, { model, handle: trainingHandle, initialWeights: currentInitialWeights });
+      // Large step count so the round timer drives restarts, not the step limit.
+      // seed: 0 ensures all clients initialize from identical weights on round 0.
+      const gen = train(device, docs, { model, handle: trainingHandle, initialWeights: currentInitialWeights, steps: 999999, seed: 0 });
 
       for await (const event of gen) {
         if (!inSession || abortFlag) break;
@@ -1394,6 +1397,7 @@ async function startFederatedTraining(initialWeights) {
           // Restart with new global weights when server round completes
           if (newRoundWeights) {
             currentInitialWeights = newRoundWeights;
+            roundStartFlat = new Float32Array(newRoundWeights); // base for next round's delta
             newRoundWeights = null;
             break; // exits inner for-await, outer while restarts with new weights
           }
