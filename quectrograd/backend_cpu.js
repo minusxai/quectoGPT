@@ -9,21 +9,18 @@ export function initCPU() {
       return new Float32Array(size);
     },
 
-    free(_handle) {
-      // no-op for JS arrays
-    },
+    free(_handle) {},
 
     fromArray(arr) {
       return new Float32Array(arr);
     },
 
     toArray(handle, _size) {
-      return new Float32Array(handle); // copy
+      return new Float32Array(handle);
     },
 
     // --- Forward ops ---
 
-    // C[i,j] = sum_k A[i,k] * B[k,j]  — A is MxK, B is KxN, C is MxN
     matmul(a, b, M, K, N) {
       const out = new Float32Array(M * N);
       for (let i = 0; i < M; i++) {
@@ -32,6 +29,20 @@ export function initCPU() {
           for (let j = 0; j < N; j++) {
             out[i * N + j] += aik * b[k * N + j];
           }
+        }
+      }
+      return out;
+    },
+
+    // X[M,K] @ W^T => out[M,N], where W is [N,K]
+    // out[i,j] = sum_k x[i,k] * w[j,k]
+    matmulWT(x, w, M, K, N) {
+      const out = new Float32Array(M * N);
+      for (let i = 0; i < M; i++) {
+        for (let j = 0; j < N; j++) {
+          let sum = 0;
+          for (let k = 0; k < K; k++) sum += x[i * K + k] * w[j * K + k];
+          out[i * N + j] = sum;
         }
       }
       return out;
@@ -73,8 +84,6 @@ export function initCPU() {
       return out;
     },
 
-    // Gather rows from embedding table. ids is Int32Array of length seqLen.
-    // table is (vocabSize * embdDim), output is (seqLen * embdDim)
     embedding(table, ids, vocabSize, embdDim, seqLen) {
       const out = new Float32Array(seqLen * embdDim);
       for (let i = 0; i < seqLen; i++) {
@@ -86,7 +95,6 @@ export function initCPU() {
       return out;
     },
 
-    // RMS norm along last dimension. x is (rows * cols), normalizes each row.
     rmsnorm(x, rows, cols) {
       const out = new Float32Array(rows * cols);
       for (let r = 0; r < rows; r++) {
@@ -94,13 +102,12 @@ export function initCPU() {
         const off = r * cols;
         for (let c = 0; c < cols; c++) ms += x[off + c] * x[off + c];
         ms = ms / cols;
-        const scale = 1.0 / Math.sqrt(ms + 1e-5);
-        for (let c = 0; c < cols; c++) out[off + c] = x[off + c] * scale;
+        const s = 1.0 / Math.sqrt(ms + 1e-5);
+        for (let c = 0; c < cols; c++) out[off + c] = x[off + c] * s;
       }
       return out;
     },
 
-    // Softmax along last dimension. x is (rows * cols)
     softmax(x, rows, cols) {
       const out = new Float32Array(rows * cols);
       for (let r = 0; r < rows; r++) {
@@ -117,48 +124,89 @@ export function initCPU() {
       return out;
     },
 
-    // Cross-entropy loss: -log(softmax(logits)[target]) for each row
-    // logits is (rows * cols), targets is Int32Array of length rows
-    // Returns { loss: Float32Array(rows), softmaxOut: Float32Array(rows * cols) }
+    // Fused cross-entropy: softmax + -log(p[target]), returns mean scalar + saved softmax
+    // Returns { lossHandle: Float32Array(1), softmaxOut: Float32Array }
     crossEntropyLoss(logits, targets, rows, cols) {
       const probs = this.softmax(logits, rows, cols);
-      const loss = new Float32Array(rows);
+      let meanLoss = 0;
       for (let r = 0; r < rows; r++) {
-        const p = probs[r * cols + targets[r]];
-        loss[r] = -Math.log(Math.max(p, 1e-10));
+        meanLoss += -Math.log(Math.max(probs[r * cols + targets[r]], 1e-10));
       }
-      return { loss, softmaxOut: probs };
+      meanLoss /= rows;
+      return { lossHandle: new Float32Array([meanLoss]), softmaxOut: probs };
+    },
+
+    // --- Data movement ops ---
+
+    // Slice columns: x[rows, totalCols] -> out[rows, width] starting at colStart
+    sliceCols(x, rows, totalCols, colStart, width) {
+      const out = new Float32Array(rows * width);
+      for (let r = 0; r < rows; r++)
+        for (let c = 0; c < width; c++)
+          out[r * width + c] = x[r * totalCols + colStart + c];
+      return out;
+    },
+
+    // Concat columns: multiple [rows, w_i] handles -> [rows, sum(w_i)]
+    concatCols(handles, rows, widths) {
+      const totalCols = widths.reduce((a, b) => a + b, 0);
+      const out = new Float32Array(rows * totalCols);
+      let colOff = 0;
+      for (let ti = 0; ti < handles.length; ti++) {
+        const w = widths[ti];
+        for (let r = 0; r < rows; r++)
+          for (let c = 0; c < w; c++)
+            out[r * totalCols + colOff + c] = handles[ti][r * w + c];
+        colOff += w;
+      }
+      return out;
+    },
+
+    // Stack rows: n handles of [1, cols] -> [n, cols]
+    stackRows(handles, n, cols) {
+      const out = new Float32Array(n * cols);
+      for (let i = 0; i < n; i++) out.set(handles[i], i * cols);
+      return out;
+    },
+
+    // Transpose 2D: [rows, cols] -> [cols, rows]
+    transpose2D(x, rows, cols) {
+      const out = new Float32Array(cols * rows);
+      for (let r = 0; r < rows; r++)
+        for (let c = 0; c < cols; c++)
+          out[c * rows + r] = x[r * cols + c];
+      return out;
     },
 
     // --- Backward ops ---
 
-    // dA = dC @ B^T, dB = A^T @ dC
     matmulBackward(dC, a, b, M, K, N) {
-      // dA[M,K] = dC[M,N] @ B^T[N,K]
       const dA = new Float32Array(M * K);
-      for (let i = 0; i < M; i++) {
+      for (let i = 0; i < M; i++)
         for (let j = 0; j < N; j++) {
           const dc = dC[i * N + j];
-          for (let k = 0; k < K; k++) {
-            dA[i * K + k] += dc * b[k * N + j];
-          }
+          for (let k = 0; k < K; k++) dA[i * K + k] += dc * b[k * N + j];
         }
-      }
-      // dB[K,N] = A^T[K,M] @ dC[M,N]
       const dB = new Float32Array(K * N);
-      for (let k = 0; k < K; k++) {
+      for (let k = 0; k < K; k++)
         for (let i = 0; i < M; i++) {
           const aik = a[i * K + k];
-          for (let j = 0; j < N; j++) {
-            dB[k * N + j] += aik * dC[i * N + j];
-          }
+          for (let j = 0; j < N; j++) dB[k * N + j] += aik * dC[i * N + j];
         }
-      }
       return { dA, dB };
     },
 
+    // matmulWT backward: dx = dOut @ W (regular matmul), dw = dOut^T @ X
+    matmulWTBackward(dOut, x, w, M, K, N) {
+      // dx[i,k] = sum_j dOut[i,j] * w[j,k]  =>  dx = matmul(dOut[M,N], W[N,K])
+      const dx = this.matmul(dOut, w, M, N, K);
+      // dw[j,k] = sum_i dOut[i,j] * x[i,k]  =>  dw = matmul(dOut^T[N,M], X[M,K])
+      const dOutT = this.transpose2D(dOut, M, N);
+      const dw = this.matmul(dOutT, x, N, M, K);
+      return { dx, dw };
+    },
+
     addBackward(dC, size) {
-      // dA = dC, dB = dC (copy)
       return { dA: new Float32Array(dC), dB: new Float32Array(dC) };
     },
 
@@ -192,19 +240,15 @@ export function initCPU() {
       return dx;
     },
 
-    // Scatter-add gradient back to embedding table rows
     embeddingBackward(dOut, ids, vocabSize, embdDim, seqLen) {
       const dTable = new Float32Array(vocabSize * embdDim);
       for (let i = 0; i < seqLen; i++) {
         const row = ids[i];
-        for (let j = 0; j < embdDim; j++) {
-          dTable[row * embdDim + j] += dOut[i * embdDim + j];
-        }
+        for (let j = 0; j < embdDim; j++) dTable[row * embdDim + j] += dOut[i * embdDim + j];
       }
       return dTable;
     },
 
-    // RMS norm backward
     rmsnormBackward(dOut, x, rows, cols) {
       const dx = new Float32Array(rows * cols);
       for (let r = 0; r < rows; r++) {
@@ -213,7 +257,6 @@ export function initCPU() {
         for (let c = 0; c < cols; c++) ms += x[off + c] * x[off + c];
         ms = ms / cols;
         const invRms = 1.0 / Math.sqrt(ms + 1e-5);
-        // dot(dOut, x) for this row
         let dotDX = 0;
         for (let c = 0; c < cols; c++) dotDX += dOut[off + c] * x[off + c];
         for (let c = 0; c < cols; c++) {
@@ -223,7 +266,6 @@ export function initCPU() {
       return dx;
     },
 
-    // Softmax backward: dx = softmaxOut * (dOut - sum(dOut * softmaxOut))
     softmaxBackward(dOut, softmaxOut, rows, cols) {
       const dx = new Float32Array(rows * cols);
       for (let r = 0; r < rows; r++) {
@@ -237,17 +279,46 @@ export function initCPU() {
       return dx;
     },
 
-    // Cross-entropy backward: dLogits = softmaxOut - oneHot(targets)
-    // Divided by rows for mean loss
     crossEntropyBackward(softmaxOut, targets, rows, cols) {
       const dLogits = new Float32Array(softmaxOut);
       for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          dLogits[r * cols + c] /= rows;
-        }
+        for (let c = 0; c < cols; c++) dLogits[r * cols + c] /= rows;
         dLogits[r * cols + targets[r]] -= 1.0 / rows;
       }
       return dLogits;
+    },
+
+    // Backward for sliceCols: scatter dOut[rows, width] into zeros[rows, totalCols] at colStart
+    sliceColsBackward(dOut, rows, totalCols, colStart, width) {
+      const dx = new Float32Array(rows * totalCols);
+      for (let r = 0; r < rows; r++)
+        for (let c = 0; c < width; c++)
+          dx[r * totalCols + colStart + c] = dOut[r * width + c];
+      return dx;
+    },
+
+    // Backward for concatCols: split dOut[rows, totalCols] into per-input gradients
+    splitCols(dOut, rows, widths) {
+      const totalCols = widths.reduce((a, b) => a + b, 0);
+      const results = [];
+      let colOff = 0;
+      for (const w of widths) {
+        const out = new Float32Array(rows * w);
+        for (let r = 0; r < rows; r++)
+          for (let c = 0; c < w; c++)
+            out[r * w + c] = dOut[r * totalCols + colOff + c];
+        results.push(out);
+        colOff += w;
+      }
+      return results;
+    },
+
+    // Backward for stackRows: split dOut[n, cols] into n handles
+    splitRows(handle, n, cols) {
+      const results = [];
+      for (let i = 0; i < n; i++)
+        results.push(handle.slice(i * cols, (i + 1) * cols));
+      return results;
     },
 
     // --- Optimizer ---
@@ -263,16 +334,14 @@ export function initCPU() {
       }
     },
 
-    // Utility: fill buffer with zeros
+    // --- Utilities ---
     zeros(size) {
       return new Float32Array(size);
     },
 
-    // Utility: fill buffer with values from a normal distribution
     randn(size, std) {
       const out = new Float32Array(size);
       for (let i = 0; i < size; i += 2) {
-        // Box-Muller transform
         const u1 = Math.random();
         const u2 = Math.random();
         const r = Math.sqrt(-2 * Math.log(u1));
@@ -283,12 +352,10 @@ export function initCPU() {
       return out;
     },
 
-    // Accumulate: dst += src
     accumulate(dst, src, size) {
       for (let i = 0; i < size; i++) dst[i] += src[i];
     },
 
-    // Fill with scalar
     fill(handle, value, size) {
       for (let i = 0; i < size; i++) handle[i] = value;
     },

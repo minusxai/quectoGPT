@@ -34,6 +34,8 @@ export class Tensor {
     return this.shape.reduce((a, b) => a * b, 1);
   }
 
+  // Returns Float32Array. Async for GPU (readback), sync-compatible for CPU.
+  // Always use `await tensor.toArray()` — works for both backends.
   toArray() {
     return this.backend.toArray(this.handle, this.numel());
   }

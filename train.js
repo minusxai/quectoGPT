@@ -170,7 +170,7 @@ function gptForward(tokens, stateDict, backend) {
 }
 
 // --- Inference ---
-export function inference(stateDict, tokenizer, backend, opts = {}) {
+export async function inference(stateDict, tokenizer, backend, opts = {}) {
   const temperature = opts.temperature ?? 0.5;
   const numSamples = opts.numSamples ?? 20;
   const rng = opts.rng ?? Math.random;
@@ -190,7 +190,7 @@ export function inference(stateDict, tokenizer, backend, opts = {}) {
       const logits = ops.matmulWT(row, stateDict.lm_head); // [1, vocabSize]
 
       // Apply temperature and sample
-      const logitsArr = logits.toArray();
+      const logitsArr = await logits.toArray();
       if (temperature !== 1.0) {
         for (let i = 0; i < logitsArr.length; i++) logitsArr[i] /= temperature;
       }
@@ -266,13 +266,13 @@ export async function* train(backend, docs, opts = {}) {
     const lrT = learningRate * (1 - step / numSteps);
     optimizer.step(lrT);
 
-    const lossVal = loss.toArray()[0];
+    const lossVal = (await loss.toArray())[0];
     yield { type: 'step', step: step + 1, loss: lossVal, n, totalSteps: numSteps };
   }
 
   // Inference
   clearTape();
-  const samples = inference(stateDict, tokenizer, backend, {
+  const samples = await inference(stateDict, tokenizer, backend, {
     temperature: 0.5,
     numSamples: 20,
     rng,
