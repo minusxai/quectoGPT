@@ -777,6 +777,124 @@ Deno.test({ name: "client discards stale weights and retries with latest", sanit
   wsD.close();
 });
 
+// ─── Test A: join_ack contains client_id ──────────────────────────────────────
+
+Deno.test({ name: "join_ack contains client_id", sanitizeOps: false, sanitizeResources: false }, async () => {
+  const res = await fetch(`${BASE}/train`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ weights: [0, 0], quorum: 2, round_duration_ms: 60000 }),
+  });
+  const { train_id } = await res.json();
+
+  const ws = new WebSocket(WS_URL);
+  await new Promise<void>((resolve, reject) => {
+    ws.addEventListener("open", () => resolve(), { once: true });
+    ws.addEventListener("error", () => reject(new Error("WS connection failed")), { once: true });
+  });
+
+  const ackPromise = waitForMsg(ws, "join_ack") as Promise<{ client_id: string; train_id: string }>;
+  ws.send(JSON.stringify({ type: "join", train_id, name: "device-alpha" }));
+  const ack = await ackPromise;
+
+  assertEquals(ack.train_id, train_id);
+  assertExists(ack.client_id);
+  assert(typeof ack.client_id === "string" && ack.client_id.length > 0, "client_id must be a non-empty string");
+
+  ws.close();
+});
+
+// ─── Test B: clients_changed on join and leave ────────────────────────────────
+
+Deno.test({ name: "clients_changed on join and leave", sanitizeOps: false, sanitizeResources: false }, async () => {
+  const res = await fetch(`${BASE}/train`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ weights: [0, 0], quorum: 10, round_duration_ms: 60000 }),
+  });
+  const { train_id } = await res.json();
+
+  // Client 1 joins
+  const ws1 = new WebSocket(WS_URL);
+  await new Promise<void>((r) => ws1.addEventListener("open", () => r(), { once: true }));
+  ws1.send(JSON.stringify({ type: "join", train_id, name: "c1" }));
+  // Wait for initial update + join_ack + clients_changed
+  await waitForMsg(ws1, "join_ack");
+  const cc1 = await waitForMsg(ws1, "clients_changed") as { clients: { client_id: string; name: string }[] };
+  assertEquals(cc1.clients.length, 1);
+  assertEquals(cc1.clients[0].name, "c1");
+
+  // Client 2 joins — client 1 should receive clients_changed with 2 entries
+  const cc1After2Promise = waitForMsg(ws1, "clients_changed") as Promise<{ clients: { client_id: string; name: string }[] }>;
+  const ws2 = new WebSocket(WS_URL);
+  await new Promise<void>((r) => ws2.addEventListener("open", () => r(), { once: true }));
+  ws2.send(JSON.stringify({ type: "join", train_id, name: "c2" }));
+  await waitForMsg(ws2, "join_ack");
+
+  const cc1After2 = await cc1After2Promise;
+  assertEquals(cc1After2.clients.length, 2);
+
+  // Client 3 joins
+  const cc1After3Promise = waitForMsg(ws1, "clients_changed") as Promise<{ clients: { client_id: string }[] }>;
+  const ws3 = new WebSocket(WS_URL);
+  await new Promise<void>((r) => ws3.addEventListener("open", () => r(), { once: true }));
+  ws3.send(JSON.stringify({ type: "join", train_id, name: "c3" }));
+  await waitForMsg(ws3, "join_ack");
+
+  const cc1After3 = await cc1After3Promise;
+  assertEquals(cc1After3.clients.length, 3);
+
+  // Client 2 leaves — clients 1 and 3 should each receive clients_changed with 2 entries
+  const cc1AfterLeavePromise = waitForMsg(ws1, "clients_changed") as Promise<{ clients: { client_id: string }[] }>;
+  const cc3AfterLeavePromise = waitForMsg(ws3, "clients_changed") as Promise<{ clients: { client_id: string }[] }>;
+  ws2.close();
+
+  const [cc1AfterLeave, cc3AfterLeave] = await Promise.all([cc1AfterLeavePromise, cc3AfterLeavePromise]);
+  assertEquals(cc1AfterLeave.clients.length, 2);
+  assertEquals(cc3AfterLeave.clients.length, 2);
+
+  ws1.close();
+  ws3.close();
+});
+
+// ─── Test C: update broadcast includes avg_loss after round ──────────────────
+
+Deno.test({ name: "update broadcast includes avg_loss after round", sanitizeOps: false, sanitizeResources: false }, async () => {
+  const res = await fetch(`${BASE}/train`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ weights: [0, 0, 0, 0], quorum: 2, round_duration_ms: 60000 }),
+  });
+  const { train_id } = await res.json();
+
+  const clients = await Promise.all([joinClient(train_id), joinClient(train_id)]);
+  const updatePromises = clients.map(({ ws }) =>
+    waitForMsg(ws, "update") as Promise<UpdateMsg & { payload: { avg_loss: number } }>
+  );
+
+  // loss[0] = 2.5, loss[1] = 2.4 → avg = 2.45
+  for (let i = 0; i < 2; i++) {
+    const { delta, tokens, loss } = mockTrain([0, 0, 0, 0], i);
+    clients[i].ws.send(JSON.stringify({
+      type: "publish",
+      train_id,
+      payload: { publish_id: `avg-loss-c${i}`, base_version: 0, delta, tokens, loss, steps: 10 },
+    }));
+  }
+
+  const updates = await Promise.all(updatePromises);
+  const expectedAvgLoss = (2.5 + 2.4) / 2;
+  for (const upd of updates) {
+    assert(upd.payload.avg_loss != null, "avg_loss should be present in update payload");
+    assert(
+      Math.abs(upd.payload.avg_loss - expectedAvgLoss) < 1e-10,
+      `avg_loss: expected ${expectedAvgLoss}, got ${upd.payload.avg_loss}`,
+    );
+  }
+
+  for (const { ws } of clients) ws.close();
+});
+
 // ─── Teardown ─────────────────────────────────────────────────────────────────
 
 Deno.test({ name: "teardown: stop server", sanitizeOps: false, sanitizeResources: false }, () => {

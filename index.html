@@ -426,6 +426,150 @@
     transition: width 0.1s linear;
   }
 
+  /* Lobby */
+  .lobby-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+  }
+  .lobby-card {
+    background: var(--bg-panel);
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .lobby-card-title {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    margin-bottom: 0.25rem;
+  }
+  .field-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    justify-content: space-between;
+  }
+  .field-row .input-field { text-align: right; }
+
+  /* Session bar */
+  .session-bar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.6rem 1rem;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .session-id-wrap { display: flex; align-items: center; gap: 0.4rem; }
+  .sess-id-text {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--accent);
+    letter-spacing: 0.04em;
+  }
+  .sess-countdown {
+    font-size: 0.72rem;
+    color: var(--amber);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Submit request banner */
+  .submit-banner {
+    background: #ffaa2215;
+    border: 1px solid #ffaa2244;
+    border-radius: 4px;
+    padding: 0.6rem 1rem;
+    font-size: 0.78rem;
+    color: var(--amber);
+    margin-bottom: 0.75rem;
+    letter-spacing: 0.04em;
+  }
+
+  /* Session body: devices + chart */
+  .session-body {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+  }
+  .devices-panel {
+    background: var(--bg-panel);
+    display: flex;
+    flex-direction: column;
+  }
+  .devices-header {
+    padding: 0.5rem 0.8rem;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+  }
+  .device-item {
+    padding: 0.5rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .device-item:last-child { border-bottom: none; }
+  .device-id {
+    font-size: 0.72rem;
+    color: var(--text-bright);
+    font-variant-numeric: tabular-nums;
+  }
+  .device-you {
+    font-size: 0.6rem;
+    color: var(--accent);
+    letter-spacing: 0.06em;
+  }
+  .device-name {
+    font-size: 0.68rem;
+    color: var(--text);
+  }
+  .device-time {
+    font-size: 0.6rem;
+    color: var(--text-dim);
+  }
+  .device-empty {
+    padding: 1rem 0.8rem;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+  }
+
+  /* Move chart-section border-radius inside session-body */
+  .session-body .chart-section {
+    border: none;
+    border-radius: 0;
+    margin-bottom: 0;
+  }
+
+  /* Section label above local training */
+  .section-label {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    margin-bottom: 0.75rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border);
+  }
+
   /* --- Responsive --- */
   @media (max-width: 700px) {
     .shell { padding: 1rem; }
@@ -433,6 +577,9 @@
     .chart-sidebar { border-top: 1px solid var(--border); flex-direction: row; padding: 1rem; }
     .chart-wrap { height: 240px; border-right: none; }
     .control-group { margin-left: 0; }
+    .lobby-grid { grid-template-columns: 1fr; }
+    .session-body { grid-template-columns: 1fr; }
+    .devices-panel { border-bottom: 1px solid var(--border); }
   }
 </style>
 </head>
@@ -451,6 +598,82 @@
       <div class="badge" id="badge-vocab"><span class="dot"></span>vocab —</div>
     </div>
   </header>
+
+  <!-- LOBBY: shown when not in a session -->
+  <div id="panel-lobby">
+    <div class="lobby-grid">
+      <div class="lobby-card">
+        <div class="lobby-card-title">New Session</div>
+        <div class="field-row">
+          <label class="control-label">Quorum</label>
+          <input class="input-field" id="new-quorum" type="number" value="2" min="1" style="width:60px">
+        </div>
+        <div class="field-row">
+          <label class="control-label">Round (s)</label>
+          <input class="input-field" id="new-round" type="number" value="60" min="5" style="width:70px">
+        </div>
+        <div class="field-row">
+          <label class="control-label">Grace (s)</label>
+          <input class="input-field" id="new-grace" type="number" value="12" min="1" style="width:70px">
+        </div>
+        <button class="btn primary" id="btn-new-session">Start Session</button>
+      </div>
+      <div class="lobby-card">
+        <div class="lobby-card-title">Join Session</div>
+        <div class="field-row">
+          <label class="control-label">Session ID</label>
+          <input class="input-field" id="join-id" type="text" placeholder="paste id…" style="width:100%">
+        </div>
+        <div class="field-row">
+          <label class="control-label">Device name</label>
+          <input class="input-field" id="join-name" type="text" style="width:100%">
+        </div>
+        <button class="btn primary" id="btn-join-session">Join</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SESSION: shown when connected -->
+  <div id="panel-session" hidden>
+    <!-- Session info bar -->
+    <div class="session-bar">
+      <span class="session-id-wrap">
+        <span class="control-label">Session</span>
+        <code id="sess-id" class="sess-id-text"></code>
+        <button class="btn" id="btn-copy-id" style="padding:0.2rem 0.5rem;font-size:0.65rem">copy</button>
+      </span>
+      <span class="badge" id="sess-version"><span class="dot"></span>v0</span>
+      <span id="sess-round-status" class="control-label">0 / — submitted</span>
+      <span id="sess-countdown" class="sess-countdown"></span>
+      <button class="btn danger" id="btn-leave" style="margin-left:auto">Leave</button>
+    </div>
+
+    <!-- submit_request amber banner -->
+    <div id="banner-submit" hidden class="submit-banner">
+      ⚡ Round ending — submit training results
+    </div>
+
+    <!-- 2-col: devices | chart -->
+    <div class="session-body">
+      <div class="devices-panel" id="devices-panel">
+        <div class="devices-header">Devices</div>
+        <div id="devices-list"><div class="device-empty">No devices connected</div></div>
+      </div>
+      <div class="chart-section" id="session-chart-section">
+        <div class="chart-wrap">
+          <span class="chart-label" id="sess-chart-label">avg loss / round</span>
+          <canvas id="sess-chart"></canvas>
+        </div>
+        <div class="chart-sidebar">
+          <div class="loss-big-label">avg loss</div>
+          <div class="loss-big idle" id="sess-loss-big">—</div>
+          <div class="loss-delta" id="sess-loss-delta">&nbsp;</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-label" id="local-training-section">Local Training</div>
 
   <div class="progress-wrap"><div class="progress-bar" id="progress"></div></div>
 
@@ -568,8 +791,46 @@ let selectedBackend = 'cpu';
 let hasWebGPU = false;
 let jaxDevices = [];
 
+// --- Session state ---
+let inSession = false;
+let ws = null;
+let myClientId = null;
+let currentTrainId = null;
+let currentVersion = 0;
+let currentQuorum = 0;
+let currentSubmissions = 0;
+let currentDeadlineMs = null;
+let roundLossHistory = [];
+let knownClients = [];
+let countdownTimer = null;
+
+const SERVER = 'http://localhost:4000';
+const SERVER_WS = 'ws://localhost:4000/ws';
+
+// Auto-generate a memorable device name
+function randomDeviceName() {
+  const adj = ['amber','azure','brave','calm','coral','crisp','cyber','delta','dusty','ember',
+                'faint','fleet','frost','ghost','green','indigo','iron','lunar','moss','neon',
+                'nova','pixel','quick','radio','rapid','rogue','rouge','rust','sharp','silent',
+                'solar','sonic','stark','steel','storm','swift','tidal','toxic','ultra','vapor'];
+  const noun = ['badger','bat','bear','buck','cat','cobra','condor','crane','crow','deer',
+                'dove','eagle','elk','falcon','finch','fox','frog','hawk','heron','ibis',
+                'jay','kite','lynx','mink','mole','moose','moth','newt','orca','otter',
+                'owl','pike','puma','raven','robin','shark','skunk','slug','swan','wolf'];
+  const a = adj[Math.floor(Math.random() * adj.length)];
+  const n = noun[Math.floor(Math.random() * noun.length)];
+  return `${a}-${n}`;
+}
+
 // --- DOM refs ---
 const $ = id => document.getElementById(id);
+
+// Pre-fill device name
+$('join-name').value = randomDeviceName();
+
+// Auto-join from ?session=<id> URL param — handled after handlers are registered below
+const _urlSession = new URLSearchParams(location.search).get('session');
+if (_urlSession) $('join-id').value = _urlSession;
 const chart = $('chart');
 const ctx = chart.getContext('2d');
 
@@ -807,6 +1068,273 @@ function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+// --- Session chart canvas ---
+const sessChart = $('sess-chart');
+const sessCtx = sessChart.getContext('2d');
+
+function drawSessChart() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = sessChart.parentElement.getBoundingClientRect();
+  sessChart.width = rect.width * dpr;
+  sessChart.height = rect.height * dpr;
+  sessCtx.scale(dpr, dpr);
+  const W = rect.width;
+  const H = rect.height;
+
+  sessCtx.fillStyle = '#0d0d10';
+  sessCtx.fillRect(0, 0, W, H);
+
+  const data = roundLossHistory.map(e => e.avg_loss);
+  if (data.length < 2) {
+    drawSessGrid(W, H, 0, 4, 0, 10);
+    return;
+  }
+
+  const pad = { top: 28, right: 16, bottom: 28, left: 48 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  let minL = Infinity, maxL = -Infinity;
+  for (const v of data) { if (v < minL) minL = v; if (v > maxL) maxL = v; }
+  const range = maxL - minL || 1;
+  minL -= range * 0.05;
+  maxL += range * 0.05;
+
+  const minX = roundLossHistory[0].version;
+  const maxX = roundLossHistory[roundLossHistory.length - 1].version;
+  drawSessGrid(W, H, minL, maxL, minX, maxX, pad);
+
+  sessCtx.save();
+  sessCtx.beginPath();
+  sessCtx.strokeStyle = 'rgba(34, 255, 102, 0.15)';
+  sessCtx.lineWidth = 6;
+  sessCtx.lineJoin = 'round';
+  for (let i = 0; i < data.length; i++) {
+    const x = pad.left + (i / (data.length - 1)) * plotW;
+    const y = pad.top + (1 - (data[i] - minL) / (maxL - minL)) * plotH;
+    if (i === 0) sessCtx.moveTo(x, y); else sessCtx.lineTo(x, y);
+  }
+  sessCtx.stroke();
+  sessCtx.restore();
+
+  sessCtx.save();
+  sessCtx.beginPath();
+  sessCtx.strokeStyle = '#22ff66';
+  sessCtx.lineWidth = 1.5;
+  sessCtx.lineJoin = 'round';
+  sessCtx.shadowColor = '#22ff66';
+  sessCtx.shadowBlur = 4;
+  for (let i = 0; i < data.length; i++) {
+    const x = pad.left + (i / (data.length - 1)) * plotW;
+    const y = pad.top + (1 - (data[i] - minL) / (maxL - minL)) * plotH;
+    if (i === 0) sessCtx.moveTo(x, y); else sessCtx.lineTo(x, y);
+  }
+  sessCtx.stroke();
+  sessCtx.restore();
+
+  const lastX = pad.left + plotW;
+  const lastY = pad.top + (1 - (data[data.length - 1] - minL) / (maxL - minL)) * plotH;
+  sessCtx.beginPath();
+  sessCtx.arc(lastX, lastY, 3, 0, Math.PI * 2);
+  sessCtx.fillStyle = '#22ff66';
+  sessCtx.shadowColor = '#22ff66';
+  sessCtx.shadowBlur = 10;
+  sessCtx.fill();
+  sessCtx.shadowBlur = 0;
+}
+
+function drawSessGrid(W, H, minY, maxY, minX, maxX, pad) {
+  pad = pad || { top: 28, right: 16, bottom: 28, left: 48 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  sessCtx.strokeStyle = '#151520';
+  sessCtx.lineWidth = 0.5;
+
+  const nH = 5;
+  sessCtx.font = '10px "IBM Plex Mono"';
+  sessCtx.fillStyle = '#55555f';
+  sessCtx.textAlign = 'right';
+  sessCtx.textBaseline = 'middle';
+  for (let i = 0; i <= nH; i++) {
+    const y = pad.top + (i / nH) * plotH;
+    sessCtx.beginPath();
+    sessCtx.moveTo(pad.left, y);
+    sessCtx.lineTo(pad.left + plotW, y);
+    sessCtx.stroke();
+    const val = maxY - (i / nH) * (maxY - minY);
+    sessCtx.fillText(val.toFixed(2), pad.left - 6, y);
+  }
+
+  const nV = 5;
+  sessCtx.textAlign = 'center';
+  sessCtx.textBaseline = 'top';
+  for (let i = 0; i <= nV; i++) {
+    const x = pad.left + (i / nV) * plotW;
+    sessCtx.beginPath();
+    sessCtx.moveTo(x, pad.top);
+    sessCtx.lineTo(x, pad.top + plotH);
+    sessCtx.stroke();
+    const val = Math.round(minX + (i / nV) * (maxX - minX));
+    sessCtx.fillText(`r${val}`, x, pad.top + plotH + 6);
+  }
+}
+
+// --- Session functions ---
+function enterSession(trainId) {
+  currentTrainId = trainId;
+  inSession = true;
+  $('panel-lobby').hidden = true;
+  $('panel-session').hidden = false;
+  $('sess-id').textContent = trainId.slice(0, 8) + '…';
+  roundLossHistory = [];
+  drawSessChart();
+  history.replaceState(null, '', `?session=${trainId}`);
+}
+
+function leaveSession() {
+  if (ws) { ws.close(); ws = null; }
+  clearInterval(countdownTimer);
+  countdownTimer = null;
+  inSession = false;
+  myClientId = null;
+  currentTrainId = null;
+  currentVersion = 0;
+  currentQuorum = 0;
+  currentSubmissions = 0;
+  currentDeadlineMs = null;
+  roundLossHistory = [];
+  knownClients = [];
+  $('panel-lobby').hidden = false;
+  $('panel-session').hidden = true;
+  $('banner-submit').hidden = true;
+  history.replaceState(null, '', location.pathname);
+  $('join-name').value = randomDeviceName();
+}
+
+async function connectWebSocket(trainId, name) {
+  ws = new WebSocket(SERVER_WS);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'join', train_id: trainId, name }));
+    enterSession(trainId);
+    countdownTimer = setInterval(updateCountdown, 500);
+  };
+  ws.onmessage = (e) => handleWsMessage(JSON.parse(e.data));
+  ws.onclose = ws.onerror = () => leaveSession();
+}
+
+function handleWsMessage(msg) {
+  if (msg.type === 'join_ack') {
+    myClientId = msg.client_id;
+    renderDevices();
+  }
+  if (msg.type === 'update') {
+    currentVersion = msg.payload.version;
+    currentDeadlineMs = msg.payload.deadline_ms;
+    currentSubmissions = 0;
+    if (msg.payload.avg_loss != null) {
+      roundLossHistory.push({ version: msg.payload.version - 1, avg_loss: msg.payload.avg_loss });
+      const lossEl = $('sess-loss-big');
+      lossEl.textContent = msg.payload.avg_loss.toFixed(2);
+      lossEl.classList.remove('idle');
+    }
+    $('sess-version').innerHTML = `<span class="dot"></span>v${currentVersion}`;
+    $('sess-version').classList.add('active');
+    updateRoundStatus();
+    drawSessChart();
+    $('banner-submit').hidden = true;
+  }
+  if (msg.type === 'clients_changed') {
+    knownClients = msg.clients;
+    renderDevices();
+  }
+  if (msg.type === 'submit_request') {
+    $('banner-submit').hidden = false;
+  }
+  if (msg.type === 'publish_ack') {
+    currentSubmissions = msg.submissions;
+    currentQuorum = msg.quorum;
+    updateRoundStatus();
+  }
+}
+
+function renderDevices() {
+  const list = $('devices-list');
+  if (knownClients.length === 0) {
+    list.innerHTML = '<div class="device-empty">No devices connected</div>';
+    return;
+  }
+  list.innerHTML = knownClients.map(c => {
+    const isMe = c.client_id === myClientId;
+    const ago = Math.round((Date.now() - c.joined_at) / 1000);
+    const agoStr = ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ago`;
+    return `<div class="device-item${isMe ? ' device-item-me' : ''}">
+      <span class="device-id">${escHtml(c.client_id.slice(0, 8))}${isMe ? '<span class="device-you"> you</span>' : ''}</span>
+      ${c.name ? `<span class="device-name">${escHtml(c.name)}</span>` : ''}
+      <span class="device-time">${agoStr}</span>
+    </div>`;
+  }).join('');
+}
+
+function updateCountdown() {
+  if (!currentDeadlineMs) return;
+  const remaining = Math.max(0, currentDeadlineMs - Date.now());
+  const s = Math.ceil(remaining / 1000);
+  $('sess-countdown').textContent = `round ends in ${s}s`;
+}
+
+function updateRoundStatus() {
+  $('sess-round-status').textContent = `${currentSubmissions} / ${currentQuorum || '—'} submitted`;
+}
+
+// --- Session button handlers ---
+$('btn-new-session').onclick = async () => {
+  const quorum = parseInt($('new-quorum').value) || 2;
+  const round_duration_ms = (parseInt($('new-round').value) || 60) * 1000;
+  const grace_period_ms = (parseInt($('new-grace').value) || 12) * 1000;
+  try {
+    const res = await fetch(`${SERVER}/train`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ weights: [], quorum, round_duration_ms, grace_period_ms }),
+    });
+    const { train_id } = await res.json();
+    currentQuorum = quorum;
+    const name = $('join-name').value.trim();
+    await connectWebSocket(train_id, name);
+  } catch (e) {
+    console.error('Failed to create session:', e);
+    alert('Could not reach server at ' + SERVER);
+  }
+};
+
+$('btn-join-session').onclick = async () => {
+  const trainId = $('join-id').value.trim();
+  if (!trainId) return;
+  try {
+    const status = await fetch(`${SERVER}/train/${trainId}`).then(r => r.json());
+    if (status.error) { alert('Session not found'); return; }
+    currentQuorum = status.quorum;
+    roundLossHistory = (status.loss_history || []).map(e => ({ version: e.version, avg_loss: e.avg_loss }));
+    const name = $('join-name').value.trim();
+    await connectWebSocket(trainId, name);
+  } catch (e) {
+    console.error('Failed to join session:', e);
+    alert('Could not reach server at ' + SERVER);
+  }
+};
+
+$('btn-leave').onclick = () => leaveSession();
+
+$('btn-copy-id').onclick = () => {
+  navigator.clipboard.writeText(currentTrainId);
+  $('btn-copy-id').textContent = 'copied!';
+  setTimeout(() => $('btn-copy-id').textContent = 'copy', 1500);
+};
+
+// Resize handler for session chart
+window.addEventListener('resize', () => { if (inSession) drawSessChart(); });
+
 // --- Training ---
 $('btn-start').onclick = async () => {
   if (running) return;
@@ -929,6 +1457,9 @@ $('btn-stop').onclick = () => { abortFlag = true; };
 // Initial chart draw
 requestAnimationFrame(() => drawChart());
 window.addEventListener('resize', () => drawChart());
+
+// Auto-join if ?session= was in the URL (all handlers now registered)
+if (_urlSession) $('btn-join-session').click();
 </script>
 </body>
 </html>

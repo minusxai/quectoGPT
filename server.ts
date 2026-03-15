@@ -12,6 +12,7 @@ type TrainSession = {
   deadline_ms: number;
   submit_request_sent: boolean;
   clients: Set<WebSocket>;
+  client_list: Map<WebSocket, { id: string; name: string; joined_at: number }>;
   delta_accumulator: number[];
   token_accumulator: number;
   submissions: number;
@@ -39,6 +40,19 @@ function randomId(): string {
 function send(ws: WebSocket, data: unknown) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(data));
+  }
+}
+
+function broadcastClientsChanged(session: TrainSession) {
+  const clients = [...session.client_list.values()].map((c) => ({
+    client_id: c.id,
+    name: c.name,
+    joined_at: c.joined_at,
+  }));
+  const msg = { type: "clients_changed", train_id: session.train_id, clients };
+  for (const ws of session.clients) {
+    if (ws.readyState === WebSocket.OPEN) send(ws, msg);
+    else session.clients.delete(ws);
   }
 }
 
@@ -76,6 +90,7 @@ function tryCompleteRound(session: TrainSession) {
       version: session.version,
       weights: session.weights,
       deadline_ms: session.deadline_ms,
+      avg_loss,
     },
   };
 
@@ -89,14 +104,21 @@ function tryCompleteRound(session: TrainSession) {
   }
 }
 
-function handleJoin(ws: WebSocket, train_id: string) {
+function handleJoin(ws: WebSocket, train_id: string, name: string) {
   const session = sessions.get(train_id);
   if (!session) {
     send(ws, { type: "error", message: "session not found", train_id });
     return;
   }
 
+  const clientId = randomId();
   session.clients.add(ws);
+  session.client_list.set(ws, { id: clientId, name, joined_at: Date.now() });
+
+  const lastAvgLoss = session.loss_history.length > 0
+    ? session.loss_history.at(-1)!.avg_loss
+    : null;
+
   send(ws, {
     type: "update",
     train_id,
@@ -104,13 +126,18 @@ function handleJoin(ws: WebSocket, train_id: string) {
       version: session.version,
       weights: session.weights,
       deadline_ms: session.deadline_ms,
+      avg_loss: lastAvgLoss,
     },
   });
+
+  send(ws, { type: "join_ack", train_id, client_id: clientId });
 
   // If already in grace period, notify immediately so the client can wrap up
   if (session.submit_request_sent) {
     send(ws, { type: "submit_request", train_id, deadline_ms: session.deadline_ms });
   }
+
+  broadcastClientsChanged(session);
 }
 
 function handlePublish(ws: WebSocket, train_id: string, payload: PublishPayload) {
@@ -199,7 +226,8 @@ function handleWebSocket(req: Request): Response {
     }
 
     if (type === "join") {
-      handleJoin(ws, train_id);
+      const name = (msg as { name?: string }).name?.trim().slice(0, 32) ?? '';
+      handleJoin(ws, train_id, name);
     } else if (type === "publish") {
       if (!msg.payload) {
         send(ws, { type: "error", message: "missing payload" });
@@ -214,12 +242,16 @@ function handleWebSocket(req: Request): Response {
   ws.onclose = () => {
     for (const session of sessions.values()) {
       session.clients.delete(ws);
+      session.client_list.delete(ws);
+      if (session.clients.size > 0) broadcastClientsChanged(session);
     }
   };
 
   ws.onerror = () => {
     for (const session of sessions.values()) {
       session.clients.delete(ws);
+      session.client_list.delete(ws);
+      if (session.clients.size > 0) broadcastClientsChanged(session);
     }
   };
 
@@ -264,6 +296,7 @@ Deno.serve({ port: 4000 }, async (req) => {
       deadline_ms: now + round_duration_ms,
       submit_request_sent: false,
       clients: new Set(),
+      client_list: new Map(),
       delta_accumulator: new Array(weights.length).fill(0),
       token_accumulator: 0,
       submissions: 0,
@@ -307,6 +340,11 @@ Deno.serve({ port: 4000 }, async (req) => {
       deadline_ms: session.deadline_ms,
       submit_request_sent: session.submit_request_sent,
       clients: session.clients.size,
+      client_list: [...session.client_list.values()].map((c) => ({
+        client_id: c.id,
+        name: c.name,
+        joined_at: c.joined_at,
+      })),
       submissions: session.submissions,
       token_accumulator: session.token_accumulator,
       loss_history: session.loss_history,

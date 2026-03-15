@@ -11,7 +11,9 @@ A port of Karpathy's [microgpt.py](https://github.com/karpathy/microgpt) using [
 - **gpt.js** — GPT model definition: config, param init, forward, loss, inference (pure functions)
 - **train.js** — batched training loop with `valueAndGrad` + optax `adam`, train/val loss tracking
 - **bench.js** — correctness tests + benchmarks using jax-js ops + `grad()`
-- **index.html** — browser training dashboard with real-time loss chart (train + val)
+- **server.ts** — federated training coordination server: session management, token-weighted averaging, WebSocket broadcast
+- **server_test.ts** — 15 E2E tests for the coordination server
+- **index.html** — browser training dashboard + federated session UI (lobby, devices panel, per-round loss chart)
 - **bench.html** — browser benchmark page (correctness tests, gradient checks, op timing, training bench)
 
 ## Architecture
@@ -29,7 +31,9 @@ quectoGPT/
   gpt.js                  — model: configs, initParams, forward, loss, inference
   train.js                — training loop: window sampling, batched valueAndGrad, adam
   bench.js                — correctness tests + benchmarks (CLI)
-  index.html              — browser training dashboard
+  server.ts               — federated training coordination server (Deno, :4000)
+  server_test.ts          — E2E tests for the coordination server
+  index.html              — browser training dashboard + federated session UI
   bench.html              — browser benchmark page
 ```
 
@@ -121,6 +125,47 @@ No build step — pure ES modules. Browser uses esm.sh CDN for jax-js.
 | `--blocksize=` | per-model | Context window size override |
 | `--backend=` | `cpu` | Backend (`cpu` or `webgpu`) |
 | `--prompt=` | _(none)_ | Seed text for inference |
+
+## Federated Training
+
+Multiple browser tabs or devices can train collaboratively via the coordination server (`server.ts`). Each round, clients train locally and submit weight deltas; the server aggregates them with token-weighted averaging and broadcasts the updated weights.
+
+### Start the server
+
+```bash
+deno run --allow-net server.ts
+# Listens on :4000
+```
+
+### Open the browser UI
+
+```bash
+python -m http.server
+# or: npx serve .
+```
+
+Open `http://localhost:8000/index.html` in one or more browser tabs/devices.
+
+### Workflow
+
+1. **New Session** — set quorum, round duration, grace period and click "Start Session". Training starts automatically.
+2. **Share the URL** — the address bar updates to `?session=<id>`. Share it directly; recipients land in the session immediately.
+3. **Join** — paste the ID in the "Join Session" card, or open the shared URL. Training resumes from the server's current global weights.
+4. When the grace period starts, the ⚡ banner appears — clients submit their weight deltas automatically.
+5. After the round closes, the server broadcasts averaged weights. All clients restart training from the new global weights — loss should drop with each round as more devices contribute.
+
+### Run server tests
+
+```bash
+deno test --allow-net --allow-read --allow-run server_test.ts
+# Expected: 15 tests pass
+```
+
+### Architecture
+
+- **server.ts** — Deno HTTP + WebSocket server on `:4000`. Manages sessions, tracks connected clients, performs token-weighted federated averaging each round.
+- **WebSocket messages**: `join` → `join_ack` + `update` + `clients_changed`; `publish` → `publish_ack`; `submit_request` (grace period alert); `update` (new weights + `avg_loss` after each round).
+- **REST**: `POST /train` (create), `GET /train/:id` (status), `DELETE /train/:id` (teardown).
 
 ## Requirements
 
