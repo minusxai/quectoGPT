@@ -6,6 +6,11 @@ An amalgam of Karpathy's [microgpt](https://github.com/karpathy/microgpt) (minim
 
 The entire pipeline — BPE tokenizer training, batched forward/backward, federated weight aggregation — runs in the browser. Zero Python. Any device with a browser can contribute.
 
+[Live demo](https://quectoGPT.minusxapps.com/index.html) (GPU training in Chrome recommended)
+
+
+![Screenshot](./img.png)
+
 ## What this is
 
 - **bpe.js** — byte-pair encoding tokenizer (training + encode/decode)
