@@ -1,17 +1,26 @@
 // quectoGPT training — GPT model definition + training loop
 // Works with both CPU and WebGPU backends
-// Node: node train.js [--backend=cpu|webgpu] [--steps=100]
+// Node: node train.js [--backend=cpu|webgpu] [--steps=200] [--model=medium]
+// Deno: deno run --allow-read --unstable-webgpu train.js --backend=webgpu --model=medium
 // Browser: imported by index.html
 
 import { Tensor, backward, zeroGrad, clearTape, ops, Adam } from './quectrograd/index.js';
 import { initCPU } from './quectrograd/backend_cpu.js';
 
-// --- Hyperparameters (matching microgpt.py) ---
-const N_LAYER = 1;
-const N_EMBD = 16;
-const BLOCK_SIZE = 16;
-const N_HEAD = 4;
-const HEAD_DIM = N_EMBD / N_HEAD;
+// --- Model configs ---
+export const MODEL_CONFIGS = {
+  nano:   { nLayer: 1, nEmbd: 16,  blockSize: 16,  nHead: 4, lr: 0.01,  initStd: 0.08, steps: 100 },
+  tiny:   { nLayer: 2, nEmbd: 64,  blockSize: 32,  nHead: 4, lr: 3e-3,  initStd: 0.04, steps: 200 },
+  small:  { nLayer: 4, nEmbd: 128, blockSize: 64,  nHead: 4, lr: 1e-3,  initStd: 0.02, steps: 200 },
+  medium: { nLayer: 6, nEmbd: 256, blockSize: 128, nHead: 8, lr: 3e-4,  initStd: 0.02, steps: 300 },
+  large:  { nLayer: 8, nEmbd: 512, blockSize: 256, nHead: 8, lr: 1e-4,  initStd: 0.01, steps: 500 },
+};
+
+function resolveConfig(name) {
+  const cfg = MODEL_CONFIGS[name];
+  if (!cfg) throw new Error(`Unknown model config: ${name}. Choose from: ${Object.keys(MODEL_CONFIGS).join(', ')}`);
+  return { ...cfg, headDim: cfg.nEmbd / cfg.nHead };
+}
 
 // --- Seeded RNG (for reproducibility) ---
 function mulberry32(seed) {
@@ -39,26 +48,26 @@ export function buildTokenizer(docs) {
 }
 
 // --- Parameter initialization ---
-function initParams(vocabSize, backend, rng) {
-  const matrix = (rows, cols, std = 0.08) => {
+function initParams(vocabSize, cfg, backend, rng) {
+  const matrix = (rows, cols, std = cfg.initStd) => {
     const data = new Float32Array(rows * cols);
     for (let i = 0; i < data.length; i++) data[i] = seededGauss(rng, std);
     return Tensor.from(data, [rows, cols], backend, { requiresGrad: true });
   };
 
   const stateDict = {
-    wte: matrix(vocabSize, N_EMBD),
-    wpe: matrix(BLOCK_SIZE, N_EMBD),
-    lm_head: matrix(vocabSize, N_EMBD),
+    wte: matrix(vocabSize, cfg.nEmbd),
+    wpe: matrix(cfg.blockSize, cfg.nEmbd),
+    lm_head: matrix(vocabSize, cfg.nEmbd),
   };
 
-  for (let i = 0; i < N_LAYER; i++) {
-    stateDict[`layer${i}.attn_wq`] = matrix(N_EMBD, N_EMBD);
-    stateDict[`layer${i}.attn_wk`] = matrix(N_EMBD, N_EMBD);
-    stateDict[`layer${i}.attn_wv`] = matrix(N_EMBD, N_EMBD);
-    stateDict[`layer${i}.attn_wo`] = matrix(N_EMBD, N_EMBD);
-    stateDict[`layer${i}.mlp_fc1`] = matrix(4 * N_EMBD, N_EMBD);
-    stateDict[`layer${i}.mlp_fc2`] = matrix(N_EMBD, 4 * N_EMBD);
+  for (let i = 0; i < cfg.nLayer; i++) {
+    stateDict[`layer${i}.attn_wq`] = matrix(cfg.nEmbd, cfg.nEmbd);
+    stateDict[`layer${i}.attn_wk`] = matrix(cfg.nEmbd, cfg.nEmbd);
+    stateDict[`layer${i}.attn_wv`] = matrix(cfg.nEmbd, cfg.nEmbd);
+    stateDict[`layer${i}.attn_wo`] = matrix(cfg.nEmbd, cfg.nEmbd);
+    stateDict[`layer${i}.mlp_fc1`] = matrix(4 * cfg.nEmbd, cfg.nEmbd);
+    stateDict[`layer${i}.mlp_fc2`] = matrix(cfg.nEmbd, 4 * cfg.nEmbd);
   }
 
   return stateDict;
@@ -69,108 +78,92 @@ function getAllParams(stateDict) {
 }
 
 // --- Single-token GPT forward (used for both training and inference) ---
-// Processes one token at position `pos`, using KV cache for attention.
-// Returns the output embedding [1, N_EMBD] after all layers.
-function gptForwardToken(tokenId, posId, kvCache, stateDict, backend) {
+function gptForwardToken(tokenId, posId, kvCache, stateDict, cfg, backend) {
   const tokenIds = new Int32Array([tokenId]);
   const posIds = new Int32Array([posId]);
 
-  let row = ops.embedding(stateDict.wte, tokenIds);      // [1, N_EMBD]
-  const posEmb = ops.embedding(stateDict.wpe, posIds);    // [1, N_EMBD]
+  let row = ops.embedding(stateDict.wte, tokenIds);
+  const posEmb = ops.embedding(stateDict.wpe, posIds);
   row = ops.add(row, posEmb);
   row = ops.rmsnorm(row);
 
-  for (let li = 0; li < N_LAYER; li++) {
+  for (let li = 0; li < cfg.nLayer; li++) {
     const rowResidual = row;
     row = ops.rmsnorm(row);
 
-    // QKV projections using matmulWT (matches Python's linear)
-    const q = ops.matmulWT(row, stateDict[`layer${li}.attn_wq`]); // [1, N_EMBD]
+    const q = ops.matmulWT(row, stateDict[`layer${li}.attn_wq`]);
     const k = ops.matmulWT(row, stateDict[`layer${li}.attn_wk`]);
     const v = ops.matmulWT(row, stateDict[`layer${li}.attn_wv`]);
 
     kvCache[li].keys.push(k);
     kvCache[li].values.push(v);
 
-    // Multi-head attention
     const headOuts = [];
-    for (let h = 0; h < N_HEAD; h++) {
-      const hs = h * HEAD_DIM;
+    for (let h = 0; h < cfg.nHead; h++) {
+      const hs = h * cfg.headDim;
 
-      // Extract head slices (differentiable)
-      const qH = ops.sliceCols(q, hs, HEAD_DIM); // [1, HEAD_DIM]
+      const qH = ops.sliceCols(q, hs, cfg.headDim);
       const numKeys = kvCache[li].keys.length;
 
-      // Compute attention scores against all cached keys
       const scoreTerms = [];
       for (let t = 0; t < numKeys; t++) {
-        const kT = ops.sliceCols(kvCache[li].keys[t], hs, HEAD_DIM); // [1, HEAD_DIM]
-        const kTrans = ops.transpose2D(kT); // [HEAD_DIM, 1]
-        const score = ops.matmul(qH, kTrans); // [1, 1]
-        scoreTerms.push(ops.scale(score, 1.0 / Math.sqrt(HEAD_DIM)));
+        const kT = ops.sliceCols(kvCache[li].keys[t], hs, cfg.headDim);
+        const kTrans = ops.transpose2D(kT);
+        const score = ops.matmul(qH, kTrans);
+        scoreTerms.push(ops.scale(score, 1.0 / Math.sqrt(cfg.headDim)));
       }
 
-      // Concatenate scores into [1, numKeys] and softmax
       const scoresRow = ops.concatCols(scoreTerms);
-      const attnWeights = ops.softmax(scoresRow); // [1, numKeys]
+      const attnWeights = ops.softmax(scoresRow);
 
-      // Weighted sum of values: attn_weights[1, numKeys] @ V_stacked[numKeys, HEAD_DIM]
-      const vSlices = kvCache[li].values.map(vv => ops.sliceCols(vv, hs, HEAD_DIM));
-      const vStack = ops.stackRows(vSlices); // [numKeys, HEAD_DIM]
-      const headOut = ops.matmul(attnWeights, vStack); // [1, HEAD_DIM]
+      const vSlices = kvCache[li].values.map(vv => ops.sliceCols(vv, hs, cfg.headDim));
+      const vStack = ops.stackRows(vSlices);
+      const headOut = ops.matmul(attnWeights, vStack);
       headOuts.push(headOut);
     }
 
-    // Concat heads → [1, N_EMBD]
     const xAttn = ops.concatCols(headOuts);
 
-    // Output projection + residual
     row = ops.matmulWT(xAttn, stateDict[`layer${li}.attn_wo`]);
     row = ops.add(row, rowResidual);
 
-    // MLP block
     const mlpResidual = row;
     row = ops.rmsnorm(row);
-    row = ops.matmulWT(row, stateDict[`layer${li}.mlp_fc1`]); // [1, 4*N_EMBD]
+    row = ops.matmulWT(row, stateDict[`layer${li}.mlp_fc1`]);
     row = ops.relu(row);
-    row = ops.matmulWT(row, stateDict[`layer${li}.mlp_fc2`]); // [1, N_EMBD]
+    row = ops.matmulWT(row, stateDict[`layer${li}.mlp_fc2`]);
     row = ops.add(row, mlpResidual);
   }
 
-  return row; // [1, N_EMBD]
+  return row;
 }
 
 // --- Full forward pass for training: process a document ---
-function gptForward(tokens, stateDict, backend) {
+function gptForward(tokens, stateDict, cfg, backend) {
   const seqLen = tokens.length - 1;
-  const n = Math.min(BLOCK_SIZE, seqLen);
+  const n = Math.min(cfg.blockSize, seqLen);
 
   const kvCache = [];
-  for (let li = 0; li < N_LAYER; li++) kvCache.push({ keys: [], values: [] });
+  for (let li = 0; li < cfg.nLayer; li++) kvCache.push({ keys: [], values: [] });
 
   const outputRows = [];
   const targetIds = new Int32Array(n);
 
   for (let pos = 0; pos < n; pos++) {
     targetIds[pos] = tokens[pos + 1];
-    const row = gptForwardToken(tokens[pos], pos, kvCache, stateDict, backend);
+    const row = gptForwardToken(tokens[pos], pos, kvCache, stateDict, cfg, backend);
     outputRows.push(row);
   }
 
-  // Stack all output rows → [n, N_EMBD]
   const output = ops.stackRows(outputRows);
-
-  // Logits: [n, N_EMBD] @ lm_head^T → [n, vocabSize]
   const logits = ops.matmulWT(output, stateDict.lm_head);
-
-  // Cross-entropy loss
   const loss = ops.crossEntropyLoss(logits, targetIds);
 
   return { loss, logits, n };
 }
 
 // --- Inference ---
-export async function inference(stateDict, tokenizer, backend, opts = {}) {
+export async function inference(stateDict, tokenizer, cfg, backend, opts = {}) {
   const temperature = opts.temperature ?? 0.5;
   const numSamples = opts.numSamples ?? 20;
   const rng = opts.rng ?? Math.random;
@@ -181,20 +174,18 @@ export async function inference(stateDict, tokenizer, backend, opts = {}) {
     const generated = [];
 
     const kvCache = [];
-    for (let li = 0; li < N_LAYER; li++) kvCache.push({ keys: [], values: [] });
+    for (let li = 0; li < cfg.nLayer; li++) kvCache.push({ keys: [], values: [] });
 
-    for (let pos = 0; pos < BLOCK_SIZE; pos++) {
+    for (let pos = 0; pos < cfg.blockSize; pos++) {
       clearTape();
 
-      const row = gptForwardToken(tokenId, pos, kvCache, stateDict, backend);
-      const logits = ops.matmulWT(row, stateDict.lm_head); // [1, vocabSize]
+      const row = gptForwardToken(tokenId, pos, kvCache, stateDict, cfg, backend);
+      const logits = ops.matmulWT(row, stateDict.lm_head);
 
-      // Apply temperature and sample
       const logitsArr = await logits.toArray();
       if (temperature !== 1.0) {
         for (let i = 0; i < logitsArr.length; i++) logitsArr[i] /= temperature;
       }
-      // Softmax
       let maxVal = -Infinity;
       for (let i = 0; i < logitsArr.length; i++) if (logitsArr[i] > maxVal) maxVal = logitsArr[i];
       const probs = new Float32Array(logitsArr.length);
@@ -205,7 +196,6 @@ export async function inference(stateDict, tokenizer, backend, opts = {}) {
       }
       for (let i = 0; i < probs.length; i++) probs[i] /= sum;
 
-      // Weighted random choice
       const r = rng();
       let cumul = 0;
       let chosen = probs.length - 1;
@@ -227,12 +217,13 @@ export async function inference(stateDict, tokenizer, backend, opts = {}) {
 
 // --- Training generator (used by both Node CLI and browser) ---
 export async function* train(backend, docs, opts = {}) {
-  const numSteps = opts.steps ?? 100;
-  const learningRate = opts.lr ?? 0.01;
+  const modelName = opts.model ?? 'nano';
+  const cfg = resolveConfig(modelName);
+  const numSteps = opts.steps ?? cfg.steps;
+  const learningRate = opts.lr ?? cfg.lr;
   const seed = opts.seed ?? 42;
   const rng = mulberry32(seed);
 
-  // Shuffle docs with seeded RNG
   const shuffledDocs = [...docs];
   for (let i = shuffledDocs.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
@@ -240,7 +231,7 @@ export async function* train(backend, docs, opts = {}) {
   }
 
   const tokenizer = buildTokenizer(shuffledDocs);
-  const stateDict = initParams(tokenizer.vocabSize, backend, rng);
+  const stateDict = initParams(tokenizer.vocabSize, cfg, backend, rng);
   const params = getAllParams(stateDict);
   const paramCount = params.reduce((s, p) => s + p.numel(), 0);
 
@@ -251,7 +242,7 @@ export async function* train(backend, docs, opts = {}) {
     eps: 1e-8,
   });
 
-  yield { type: 'init', vocabSize: tokenizer.vocabSize, paramCount, backend: backend.name };
+  yield { type: 'init', vocabSize: tokenizer.vocabSize, paramCount, backend: backend.name, model: modelName, cfg };
 
   for (let step = 0; step < numSteps; step++) {
     clearTape();
@@ -259,7 +250,7 @@ export async function* train(backend, docs, opts = {}) {
 
     const doc = shuffledDocs[step % shuffledDocs.length];
     const tokens = tokenizer.encode(doc);
-    const { loss, n } = gptForward(tokens, stateDict, backend);
+    const { loss, n } = gptForward(tokens, stateDict, cfg, backend);
 
     backward(loss);
 
@@ -270,9 +261,8 @@ export async function* train(backend, docs, opts = {}) {
     yield { type: 'step', step: step + 1, loss: lossVal, n, totalSteps: numSteps };
   }
 
-  // Inference
   clearTape();
-  const samples = await inference(stateDict, tokenizer, backend, {
+  const samples = await inference(stateDict, tokenizer, cfg, backend, {
     temperature: 0.5,
     numSamples: 20,
     rng,
@@ -290,8 +280,9 @@ async function main() {
     return a ? a.split('=')[1] : def;
   };
 
+  const modelName = getArg('model', 'nano');
   const backendName = getArg('backend', 'cpu');
-  const steps = parseInt(getArg('steps', '100'));
+  const steps = getArg('steps', null);
 
   let backend;
   if (backendName === 'webgpu') {
@@ -301,16 +292,19 @@ async function main() {
     backend = initCPU();
   }
 
-  // Load data
   const text = isDeno
     ? Deno.readTextFileSync('input.txt')
     : (await import('fs')).readFileSync('input.txt', 'utf-8');
   const docs = text.split('\n').filter(l => l.trim());
 
+  console.log(`model: ${modelName}`);
   console.log(`num docs: ${docs.length}`);
   console.log(`backend: ${backend.name}`);
 
-  const gen = train(backend, docs, { steps });
+  const trainOpts = { model: modelName };
+  if (steps) trainOpts.steps = parseInt(steps);
+
+  const gen = train(backend, docs, trainOpts);
 
   const write = isDeno
     ? (s) => Deno.stdout.writeSync(new TextEncoder().encode(s))
@@ -319,7 +313,7 @@ async function main() {
   for await (const event of gen) {
     if (event.type === 'init') {
       console.log(`vocab size: ${event.vocabSize}`);
-      console.log(`num params: ${event.paramCount}`);
+      console.log(`num params: ${event.paramCount.toLocaleString()}`);
     } else if (event.type === 'step') {
       write(`\rstep ${String(event.step).padStart(4)} / ${String(event.totalSteps).padStart(4)} | loss ${event.loss.toFixed(4)}`);
     } else if (event.type === 'done') {
@@ -329,12 +323,10 @@ async function main() {
   }
 }
 
-// Run if executed directly
-const isDeno = typeof Deno !== 'undefined';
-const isNode = typeof process !== 'undefined' && process.versions?.node;
-if (isDeno) {
-  main().catch(console.error);
-} else if (isNode) {
+// Run if executed directly (not when imported as a module)
+if (typeof Deno !== 'undefined') {
+  if (import.meta.main) main().catch(console.error);
+} else if (typeof process !== 'undefined' && process.versions?.node) {
   const url = await import('url');
   if (import.meta.url === url.pathToFileURL(process.argv[1]).href) {
     main().catch(console.error);

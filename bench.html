@@ -985,7 +985,7 @@ async function runTrainingBench(backend) {
 
     const t0 = performance.now();
     const losses = [];
-    const gen = train(backend, docs, { steps });
+    const gen = train(backend, docs, { steps, model: 'nano' });
 
     for await (const event of gen) {
       if (event.type === 'step') {

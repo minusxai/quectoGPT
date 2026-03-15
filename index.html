@@ -501,8 +501,19 @@
     </div>
 
     <div class="control-group">
+      <span class="control-label">Model</span>
+      <select class="input-field" id="input-model" style="width:auto;text-align:left">
+        <option value="nano">nano (~4K)</option>
+        <option value="tiny">tiny (~50K)</option>
+        <option value="small">small (~500K)</option>
+        <option value="medium">medium (~4M)</option>
+        <option value="large">large (~25M)</option>
+      </select>
+    </div>
+
+    <div class="control-group">
       <span class="control-label">Steps</span>
-      <input type="number" class="input-field" id="input-steps" value="100" min="1" max="10000">
+      <input type="number" class="input-field" id="input-steps" value="" min="1" max="50000" placeholder="auto">
     </div>
   </div>
 
@@ -733,6 +744,7 @@ $('btn-start').onclick = async () => {
   $('btn-stop').disabled = false;
   $('tog-cpu').disabled = true;
   $('tog-gpu').disabled = true;
+  $('input-model').disabled = true;
   $('stat-status').textContent = 'loading data…';
   $('samples-body').innerHTML = '<div class="samples-empty">Training in progress…</div>';
 
@@ -751,8 +763,11 @@ $('btn-start').onclick = async () => {
       backend = initCPU();
     }
 
-    const steps = parseInt($('input-steps').value) || 100;
-    const gen = train(backend, docs, { steps });
+    const model = $('input-model').value;
+    const stepsVal = $('input-steps').value.trim();
+    const trainOpts = { model };
+    if (stepsVal) trainOpts.steps = parseInt(stepsVal);
+    const gen = train(backend, docs, trainOpts);
 
     const t0 = performance.now();
     let stepCount = 0;
@@ -783,7 +798,7 @@ $('btn-start').onclick = async () => {
         $('stat-speed').textContent = (stepCount / (elapsed / 1000)).toFixed(1);
 
         // Redraw chart at ~30fps max
-        if (stepCount % Math.max(1, Math.floor(steps / 300)) === 0 || stepCount === steps) {
+        if (stepCount % Math.max(1, Math.floor(event.totalSteps / 300)) === 0 || stepCount === event.totalSteps) {
           drawChart();
         }
 
@@ -816,6 +831,7 @@ $('btn-start').onclick = async () => {
   $('btn-stop').disabled = true;
   $('tog-cpu').disabled = false;
   $('tog-gpu').disabled = !hasWebGPU;
+  $('input-model').disabled = false;
 };
 
 $('btn-stop').onclick = () => { abortFlag = true; };

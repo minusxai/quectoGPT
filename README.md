@@ -35,22 +35,41 @@ quectoGPT/
   input.txt           — training data (names dataset)
 ```
 
+## Model configs
+
+Five preset sizes, selected via `--model=`:
+
+| Config | Layers | Embed | Heads | Context | Params | Default LR |
+|--------|--------|-------|-------|---------|--------|------------|
+| `nano` | 1 | 16 | 4 | 16 | ~4K | 0.01 |
+| `tiny` | 2 | 64 | 4 | 32 | ~100K | 3e-3 |
+| `small` | 4 | 128 | 4 | 64 | ~500K | 1e-3 |
+| `medium` | 6 | 256 | 8 | 128 | ~4M | 3e-4 |
+| `large` | 8 | 512 | 8 | 256 | ~25M | 1e-4 |
+
+All configs: char-level tokenizer (27 tokens: a-z + BOS), RMSNorm, ReLU, no biases.
+
 ## Quick start
 
 ### Node.js (CPU)
 
 ```bash
-node train.js
-node train.js --backend=cpu --steps=100
+node train.js                                    # nano, 100 steps
+node train.js --model=small --steps=200          # small model
+node train.js --model=medium                     # medium, uses config defaults
 ```
 
 ### Deno (WebGPU)
 
-Deno has built-in WebGPU support — this is the easiest way to run GPU from the CLI:
+Deno has built-in WebGPU support — the easiest way to run GPU from CLI:
 
 ```bash
+# Install Deno (if needed)
+curl -fsSL https://deno.land/install.sh | sh
+
 # Train on GPU
-deno run --allow-read --unstable-webgpu train.js --backend=webgpu --steps=100
+deno run --allow-read --unstable-webgpu train.js --backend=webgpu --model=small
+deno run --allow-read --unstable-webgpu train.js --backend=webgpu --model=medium --steps=100
 
 # GPU benchmarks
 deno run --allow-read --unstable-webgpu bench.js --gpu
@@ -64,33 +83,20 @@ deno run --allow-read bench.js --cpu
 ```bash
 node bench.js           # CPU correctness + benchmarks (default)
 node bench.js --cpu     # explicit CPU
-node bench.js --all     # CPU + GPU (GPU needs Deno, see above)
 ```
 
 ### Browser
 
 Serve the directory and open `index.html` or `bench.html`:
 ```bash
-npx serve .
-# or
 python -m http.server
+# or: npx serve .
 ```
 
 No build step — pure ES modules.
 
-- **index.html** — training dashboard with real-time loss chart. Auto-detects WebGPU. Configurable steps + backend toggle.
-- **bench.html** — runs correctness tests, gradient checks, op-level benchmarks, and a training benchmark in-browser. Supports CPU and WebGPU backends.
-
-## Model
-
-Same architecture as microgpt.py — a tiny GPT-2 variant:
-- 1 transformer layer
-- 16-dim embeddings
-- 4 attention heads
-- 16 token context window
-- ~4K parameters
-- Char-level tokenizer (27 tokens: a-z + BOS)
-- RMSNorm (not LayerNorm), ReLU (not GELU), no biases
+- **index.html** — training dashboard with real-time loss chart. Auto-detects WebGPU. Model size selector (nano through large), configurable steps, backend toggle.
+- **bench.html** — correctness tests, gradient checks, op-level benchmarks, training benchmark. Supports CPU and WebGPU.
 
 ## Requirements
 
