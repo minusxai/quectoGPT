@@ -527,9 +527,15 @@
 
 </div>
 
+<script type="importmap">
+{ "imports": {
+    "@jax-js/jax": "https://esm.sh/@jax-js/jax",
+    "@jax-js/optax": "https://esm.sh/@jax-js/optax"
+}}
+</script>
 <script type="module">
+import { init, defaultDevice } from '@jax-js/jax';
 import { train } from './train.js';
-import { initCPU } from './quectrograd/backend_cpu.js';
 
 // --- State ---
 let running = false;
@@ -537,22 +543,23 @@ let abortFlag = false;
 let lossHistory = [];
 let selectedBackend = 'cpu';
 let hasWebGPU = false;
+let jaxDevices = [];
 
 // --- DOM refs ---
 const $ = id => document.getElementById(id);
 const chart = $('chart');
 const ctx = chart.getContext('2d');
 
-// --- WebGPU detection ---
+// --- jax-js init + WebGPU detection ---
 (async () => {
-  if (navigator.gpu) {
-    try {
-      const adapter = await navigator.gpu.requestAdapter();
-      if (adapter) {
-        hasWebGPU = true;
-        $('tog-gpu').disabled = false;
-      }
-    } catch {}
+  try {
+    jaxDevices = await init();
+    if (jaxDevices.includes('webgpu')) {
+      hasWebGPU = true;
+      $('tog-gpu').disabled = false;
+    }
+  } catch (e) {
+    console.warn('jax-js init:', e);
   }
 })();
 
@@ -756,19 +763,14 @@ $('btn-start').onclick = async () => {
     const docs = text.split('\n').filter(l => l.trim());
 
     // Init backend
-    let backend;
-    if (selectedBackend === 'gpu') {
-      const { initWebGPU } = await import('./quectrograd/backend_webgpu.js');
-      backend = await initWebGPU();
-    } else {
-      backend = initCPU();
-    }
+    const device = selectedBackend === 'gpu' ? 'webgpu' : 'wasm';
+    defaultDevice(device);
 
     const model = $('input-model').value;
     const stepsVal = $('input-steps').value.trim();
     const trainOpts = { model };
     if (stepsVal) trainOpts.steps = parseInt(stepsVal);
-    const gen = train(backend, docs, trainOpts);
+    const gen = train(device, docs, trainOpts);
 
     const t0 = performance.now();
     let stepCount = 0;
