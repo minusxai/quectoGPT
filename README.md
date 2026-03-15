@@ -98,6 +98,21 @@ No build step — pure ES modules.
 - **index.html** — training dashboard with real-time loss chart. Auto-detects WebGPU. Model size selector (nano through large), configurable steps, backend toggle.
 - **bench.html** — correctness tests, gradient checks, op-level benchmarks, training benchmark. Supports CPU and WebGPU.
 
+## Performance
+
+GPU speedup grows with model size (approximate, Deno CLI on Apple M-series):
+
+| Model | Params | CPU ms/step | GPU ms/step | Speedup |
+|-------|--------|-------------|-------------|---------|
+| small | 800K | 45 | 57 | ~1x |
+| medium | 4.8M | 258 | 126 | **2x** |
+| large | 25M | 1,380 | 245 | **5.6x** |
+
+Key optimizations:
+- **Batched sequence processing**: training forward pass processes all tokens at once as `[seqLen, embd]` matrices with causal masking, instead of one-at-a-time with KV cache
+- **GPU command batching**: ops accumulate in a shared `CommandEncoder`, flushed only on readback
+- **Buffer pooling**: uniform and ids buffers reused across training steps
+
 ## Requirements
 
 - **Node.js 18+** for CPU backend
