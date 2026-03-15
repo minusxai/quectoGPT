@@ -155,7 +155,11 @@ function handlePublish(ws: WebSocket, train_id: string, payload: PublishPayload)
     send(ws, { type: "publish_reject", reason: "duplicate publish_id" });
     return;
   }
-  if (payload.delta.length !== session.weights.length) {
+  if (session.weights.length === 0 && payload.delta.length > 0) {
+    // Bootstrap: first submission sets the weight dimensions (session created with empty weights)
+    session.weights = new Array(payload.delta.length).fill(0);
+    session.delta_accumulator = new Array(payload.delta.length).fill(0);
+  } else if (payload.delta.length !== session.weights.length) {
     send(ws, { type: "publish_reject", reason: "delta length mismatch", expected: session.weights.length, got: payload.delta.length });
     return;
   }

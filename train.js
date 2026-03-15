@@ -28,6 +28,30 @@ function lrMultiplier(step, totalSteps) {
   return (totalSteps - step) / (totalSteps - decayStart);
 }
 
+// --- Weight serialization helpers ---
+function flattenParams(params) {
+  const leaves = tree.leaves(params);
+  const total = leaves.reduce((s, l) => s + l.size, 0);
+  const out = new Float32Array(total);
+  let offset = 0;
+  for (const leaf of leaves) {
+    out.set(leaf.dataSync(), offset);
+    offset += leaf.size;
+  }
+  return out;
+}
+
+function loadWeights(flat, templateParams) {
+  let offset = 0;
+  return tree.map(templateParams, leaf => {
+    const chunk = flat.slice(offset, offset + leaf.size);
+    offset += leaf.size;
+    const newLeaf = np.array(chunk).reshape(leaf.shape);
+    leaf.dispose();
+    return newLeaf;
+  });
+}
+
 // --- Sample a batch of random windows from token data ---
 function sampleBatch(tokenData, batchSize, blockSize, rng) {
   const maxStart = tokenData.length - blockSize - 1;
@@ -68,6 +92,15 @@ export async function* train(backendName, trainData, valData, tokenizer, opts = 
   // Count params
   const paramLeaves = tree.leaves(params);
   const paramCount = paramLeaves.reduce((s, p) => s + p.size, 0);
+
+  // Load server weights if provided
+  if (opts.initialWeights?.length === paramCount) {
+    params = loadWeights(new Float32Array(opts.initialWeights), params);
+  }
+
+  // Expose live flat weights via handle so caller can snapshot them
+  const h = opts.handle;
+  if (h) h.getFlat = () => flattenParams(params);
 
   // Optimizer — use schedule for LR
   const lrSchedule = (count) => baseLR * lrMultiplier(count, numSteps);

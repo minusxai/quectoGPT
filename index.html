@@ -673,8 +673,6 @@
     </div>
   </div>
 
-  <div class="section-label" id="local-training-section">Local Training</div>
-
   <div class="progress-wrap"><div class="progress-bar" id="progress"></div></div>
 
   <div class="stats-strip">
@@ -716,7 +714,7 @@
     </div>
   </div>
 
-  <div class="controls">
+  <div class="controls" id="controls-bar">
     <button class="btn primary" id="btn-start">Start Training</button>
     <button class="btn danger" id="btn-stop" disabled>Stop</button>
 
@@ -803,6 +801,14 @@ let currentDeadlineMs = null;
 let roundLossHistory = [];
 let knownClients = [];
 let countdownTimer = null;
+// Per-round training tracking
+let roundSteps = 0;
+let roundLossSum = 0;
+let roundTokens = 0;
+let submitPending = false;
+let newRoundWeights = null;   // set by update msg → triggers training restart
+let roundStartFlat = null;    // flat weights at start of current round
+let trainingHandle = {};      // shared with train() to read live flat weights
 
 const SERVER = 'http://localhost:4000';
 const SERVER_WS = 'ws://localhost:4000/ws';
@@ -1186,6 +1192,7 @@ function enterSession(trainId) {
   inSession = true;
   $('panel-lobby').hidden = true;
   $('panel-session').hidden = false;
+  $('controls-bar').hidden = true;
   $('sess-id').textContent = trainId.slice(0, 8) + '…';
   roundLossHistory = [];
   drawSessChart();
@@ -1205,19 +1212,24 @@ function leaveSession() {
   currentDeadlineMs = null;
   roundLossHistory = [];
   knownClients = [];
+  abortFlag = true;
   $('panel-lobby').hidden = false;
   $('panel-session').hidden = true;
+  $('controls-bar').hidden = false;
   $('banner-submit').hidden = true;
+  roundSteps = 0; roundLossSum = 0; roundTokens = 0;
+  submitPending = false; newRoundWeights = null; roundStartFlat = null;
   history.replaceState(null, '', location.pathname);
   $('join-name').value = randomDeviceName();
 }
 
-async function connectWebSocket(trainId, name) {
+async function connectWebSocket(trainId, name, initialWeights) {
   ws = new WebSocket(SERVER_WS);
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: 'join', train_id: trainId, name }));
     enterSession(trainId);
     countdownTimer = setInterval(updateCountdown, 500);
+    startFederatedTraining(initialWeights);
   };
   ws.onmessage = (e) => handleWsMessage(JSON.parse(e.data));
   ws.onclose = ws.onerror = () => leaveSession();
@@ -1243,6 +1255,10 @@ function handleWsMessage(msg) {
     updateRoundStatus();
     drawSessChart();
     $('banner-submit').hidden = true;
+    // Signal training loop to restart with new global weights
+    if (msg.payload.weights?.length > 0) {
+      newRoundWeights = msg.payload.weights;
+    }
   }
   if (msg.type === 'clients_changed') {
     knownClients = msg.clients;
@@ -1250,6 +1266,7 @@ function handleWsMessage(msg) {
   }
   if (msg.type === 'submit_request') {
     $('banner-submit').hidden = false;
+    submitPending = true;
   }
   if (msg.type === 'publish_ack') {
     currentSubmissions = msg.submissions;
@@ -1287,6 +1304,118 @@ function updateRoundStatus() {
   $('sess-round-status').textContent = `${currentSubmissions} / ${currentQuorum || '—'} submitted`;
 }
 
+// --- Federated training ---
+function submitDelta() {
+  if (!ws || roundSteps === 0 || ws.readyState !== WebSocket.OPEN) return;
+  const currentFlat = trainingHandle.getFlat ? trainingHandle.getFlat() : null;
+  if (!currentFlat) return;
+  let delta;
+  if (roundStartFlat && roundStartFlat.length === currentFlat.length) {
+    delta = Array.from(currentFlat).map((v, i) => v - roundStartFlat[i]);
+  } else {
+    delta = Array.from(currentFlat); // first round: send full params as delta
+  }
+  const avgLoss = roundLossSum / roundSteps;
+  ws.send(JSON.stringify({
+    type: 'publish',
+    train_id: currentTrainId,
+    payload: {
+      publish_id: crypto.randomUUID(),
+      base_version: currentVersion,
+      delta,
+      steps: roundSteps,
+      tokens: Math.max(1, roundTokens),
+      loss: avgLoss,
+    }
+  }));
+  roundStartFlat = currentFlat;
+  roundSteps = 0; roundLossSum = 0; roundTokens = 0;
+}
+
+async function startFederatedTraining(initialWeights) {
+  if (running) return;
+  running = true;
+  abortFlag = false;
+  lossHistory = [];
+  trainingHandle = {};
+  roundSteps = 0; roundLossSum = 0; roundTokens = 0;
+  roundStartFlat = initialWeights?.length > 0 ? new Float32Array(initialWeights) : null;
+
+  $('stat-status').textContent = 'loading data…';
+  $('samples-body').innerHTML = '<div class="samples-empty">Training in progress…</div>';
+
+  try {
+    const resp = await fetch('input.txt');
+    const text = await resp.text();
+    const docs = text.split('\n').filter(l => l.trim());
+
+    const device = selectedBackend === 'gpu' ? 'webgpu' : 'wasm';
+    defaultDevice(device);
+
+    const model = $('input-model').value;
+    const t0 = performance.now();
+    let stepCount = 0;
+    let currentInitialWeights = initialWeights;
+
+    $('stat-status').textContent = 'training';
+
+    while (inSession && !abortFlag) {
+      const gen = train(device, docs, { model, handle: trainingHandle, initialWeights: currentInitialWeights });
+
+      for await (const event of gen) {
+        if (!inSession || abortFlag) break;
+
+        if (event.type === 'init') {
+          $('badge-backend').innerHTML = `<span class="dot"></span>${event.backend.toUpperCase()}`;
+          $('badge-backend').classList.add('active');
+          $('badge-params').innerHTML = `<span class="dot"></span>${event.paramCount.toLocaleString()} params`;
+          $('badge-vocab').innerHTML = `<span class="dot"></span>vocab ${event.vocabSize}`;
+        }
+
+        if (event.type === 'step') {
+          stepCount++;
+          lossHistory.push(event.loss);
+          roundSteps++;
+          roundLossSum += event.loss;
+          roundTokens += event.n;
+          updateStats(event);
+          const elapsed = performance.now() - t0;
+          $('stat-elapsed').textContent = formatTime(elapsed);
+          $('stat-speed').textContent = (stepCount / (elapsed / 1000)).toFixed(1);
+          if (stepCount % 5 === 0) drawChart();
+          if (stepCount % 2 === 0) await new Promise(r => requestAnimationFrame(r));
+
+          // Submit on next step after submit_request arrives
+          if (submitPending) {
+            submitPending = false;
+            submitDelta();
+          }
+
+          // Restart with new global weights when server round completes
+          if (newRoundWeights) {
+            currentInitialWeights = newRoundWeights;
+            newRoundWeights = null;
+            break; // exits inner for-await, outer while restarts with new weights
+          }
+        }
+
+        if (event.type === 'done') {
+          showSamples(event.samples);
+          drawChart();
+        }
+      }
+    }
+
+    $('stat-status').textContent = inSession ? 'training' : 'stopped';
+  } catch (err) {
+    $('stat-status').textContent = 'error';
+    console.error(err);
+    $('samples-body').innerHTML = `<div class="samples-empty" style="color:var(--red)">${escHtml(err.message)}</div>`;
+  }
+
+  running = false;
+}
+
 // --- Session button handlers ---
 $('btn-new-session').onclick = async () => {
   const quorum = parseInt($('new-quorum').value) || 2;
@@ -1301,7 +1430,7 @@ $('btn-new-session').onclick = async () => {
     const { train_id } = await res.json();
     currentQuorum = quorum;
     const name = $('join-name').value.trim();
-    await connectWebSocket(train_id, name);
+    await connectWebSocket(train_id, name, []); // start from random (seed=42)
   } catch (e) {
     console.error('Failed to create session:', e);
     alert('Could not reach server at ' + SERVER);
@@ -1317,7 +1446,8 @@ $('btn-join-session').onclick = async () => {
     currentQuorum = status.quorum;
     roundLossHistory = (status.loss_history || []).map(e => ({ version: e.version, avg_loss: e.avg_loss }));
     const name = $('join-name').value.trim();
-    await connectWebSocket(trainId, name);
+    // Use server's current global weights as starting point ([] on first round = random init)
+    await connectWebSocket(trainId, name, status.weights);
   } catch (e) {
     console.error('Failed to join session:', e);
     alert('Could not reach server at ' + SERVER);
