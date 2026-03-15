@@ -145,12 +145,12 @@ export async function inference(params, cfg, tokenizer, rngKey, opts = {}) {
       const chosen = random.categorical(k1, scaled);
       const chosenId = chosen.item();
 
-      if (chosenId === tokenizer.BOS) break;
-      generated.push(tokenizer.uchars[chosenId]);
+      if (chosenId === tokenizer.BOS || chosenId === tokenizer.EOS) break;
+      generated.push(chosenId);
       tokenIds.push(chosenId);
     }
 
-    samples.push(generated.join(''));
+    samples.push(tokenizer.decode(generated));
   }
 
   sampleKeys.dispose();

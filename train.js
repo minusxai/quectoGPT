@@ -9,14 +9,15 @@ import { MODEL_CONFIGS, resolveConfig, initParams, loss, inference } from './gpt
 
 export { MODEL_CONFIGS };
 
-// --- Tokenizer ---
-export function buildTokenizer(docs) {
-  const uchars = [...new Set(docs.join(''))].sort();
-  const BOS = uchars.length;
-  const vocabSize = uchars.length + 1;
-  const encode = (str) => [BOS, ...str.split('').map(c => uchars.indexOf(c)), BOS];
-  const decode = (ids) => ids.filter(id => id !== BOS).map(id => uchars[id]).join('');
-  return { uchars, BOS, vocabSize, encode, decode };
+// --- Tokenizer (byte-level) ---
+export function buildTokenizer() {
+  const BOS = 256, EOS = 257;
+  const vocabSize = 258;
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const encode = (str) => [BOS, ...encoder.encode(str), EOS];
+  const decode = (ids) => decoder.decode(new Uint8Array(ids.filter(id => id < 256)));
+  return { BOS, EOS, vocabSize, encode, decode };
 }
 
 // --- Seeded RNG (for doc shuffling — JS side) ---
@@ -54,7 +55,7 @@ export async function* train(backendName, docs, opts = {}) {
     [shuffledDocs[i], shuffledDocs[j]] = [shuffledDocs[j], shuffledDocs[i]];
   }
 
-  const tokenizer = buildTokenizer(shuffledDocs);
+  const tokenizer = buildTokenizer();
 
   // Init jax-js params
   const rngKey = random.key(seed);
