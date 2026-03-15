@@ -895,6 +895,213 @@ Deno.test({ name: "update broadcast includes avg_loss after round", sanitizeOps:
   for (const { ws } of clients) ws.close();
 });
 
+// ─── Test D: Full federated lifecycle (bootstrap + 2 rounds with grace period) ─
+//
+// Models the exact browser flow:
+//   1. POST /train with weights: [] (empty — server bootstraps on first publish)
+//   2. Two clients join, both receive version 0 update with empty weights
+//   3. Grace period fires → both receive submit_request
+//   4. Both publish deltas → server bootstraps + completes round 1
+//   5. Both receive version 1 update with new aggregated weights
+//   6. Both train again from new weights and publish → round 2 completes
+//   7. Both receive version 2 update
+
+Deno.test({
+  name: "full federated lifecycle: bootstrap + 2 rounds via grace period",
+  sanitizeOps: false,
+  sanitizeResources: false,
+}, async () => {
+  // round_duration_ms: 3000, grace_period_ms: 1000
+  const res = await fetch(`${BASE}/train`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ weights: [], quorum: 2, round_duration_ms: 3000, grace_period_ms: 1000 }),
+  });
+  assertEquals(res.status, 201);
+  const { train_id } = await res.json();
+
+  // Both clients join and receive initial state (empty weights, version 0)
+  const [clientA, clientB] = await Promise.all([
+    joinClient(train_id),
+    joinClient(train_id),
+  ]);
+  assertEquals(clientA.update.payload.version, 0);
+  assertEquals(clientB.update.payload.version, 0);
+  // Server was created with empty weights — initial update returns whatever server has
+  assert(Array.isArray(clientA.update.payload.weights));
+  assert(Array.isArray(clientB.update.payload.weights));
+
+  // ── Round 1: wait for grace period → submit → receive new weights ──────────
+  // Register both listeners before awaiting — broadcast fires to both simultaneously
+  const [srA, srB] = await Promise.all([
+    waitForMsg(clientA.ws, "submit_request", 6000) as Promise<{ deadline_ms: number }>,
+    waitForMsg(clientB.ws, "submit_request", 6000) as Promise<{ deadline_ms: number }>,
+  ]);
+  assert(srA.deadline_ms > Date.now(), `deadline_ms ${srA.deadline_ms} should be > now ${Date.now()}`);
+  assertEquals(srA.deadline_ms, srB.deadline_ms, "both clients see same deadline");
+
+  // Both publish deltas (bootstraps server weight dimensions to 4)
+  const round1UpdateA = waitForMsg(clientA.ws, "update", 8000) as Promise<UpdateMsg>;
+  const round1UpdateB = waitForMsg(clientB.ws, "update", 8000) as Promise<UpdateMsg>;
+
+  const deltaLen = 4;
+  const mockWeights = [0, 0, 0, 0];
+  for (const [i, { ws }] of [clientA, clientB].entries()) {
+    const { delta, tokens, loss } = mockTrain(mockWeights, i);
+    ws.send(JSON.stringify({
+      type: "publish",
+      train_id,
+      payload: { publish_id: `full-r1-c${i}`, base_version: 0, delta, tokens, loss, steps: 10 },
+    }));
+  }
+
+  const [r1A, r1B] = await Promise.all([round1UpdateA, round1UpdateB]);
+  assertEquals(r1A.payload.version, 1, "round 1 must advance to version 1");
+  assertEquals(r1B.payload.version, 1);
+  assertEquals(r1A.payload.weights.length, deltaLen, "bootstrapped weight length must match delta");
+  // avg_loss must be present (non-null) after a completed round
+  assert((r1A.payload as unknown as { avg_loss: number }).avg_loss != null, "avg_loss must be present after round 1");
+
+  // ── Round 2: train from new weights → submit → receive version 2 ──────────
+  const newWeights = r1A.payload.weights;
+
+  const [sr2A, sr2B] = await Promise.all([
+    waitForMsg(clientA.ws, "submit_request", 6000) as Promise<{ deadline_ms: number }>,
+    waitForMsg(clientB.ws, "submit_request", 6000) as Promise<{ deadline_ms: number }>,
+  ]);
+  assertEquals(sr2A.deadline_ms, sr2B.deadline_ms, "round 2 deadlines match");
+
+  const round2UpdateA = waitForMsg(clientA.ws, "update", 8000) as Promise<UpdateMsg>;
+  const round2UpdateB = waitForMsg(clientB.ws, "update", 8000) as Promise<UpdateMsg>;
+
+  for (const [i, { ws }] of [clientA, clientB].entries()) {
+    const { delta, tokens, loss } = mockTrain(newWeights, i);
+    ws.send(JSON.stringify({
+      type: "publish",
+      train_id,
+      payload: { publish_id: `full-r2-c${i}`, base_version: 1, delta, tokens, loss, steps: 10 },
+    }));
+  }
+
+  const [r2A, r2B] = await Promise.all([round2UpdateA, round2UpdateB]);
+  assertEquals(r2A.payload.version, 2, "round 2 must advance to version 2");
+  assertEquals(r2B.payload.version, 2);
+
+  // Verify weight math for round 2: token-weighted avg of deltas applied to r1 weights
+  const totalTokens = 210; // 100 + 110
+  const expectedR2 = newWeights.map((w, i) => {
+    let acc = 0;
+    for (let c = 0; c < 2; c++) {
+      const { delta, tokens } = mockTrain(newWeights, c);
+      acc += tokens * delta[i];
+    }
+    return w + acc / totalTokens;
+  });
+  for (let i = 0; i < deltaLen; i++) {
+    assert(
+      Math.abs(r2A.payload.weights[i] - expectedR2[i]) < 1e-10,
+      `round 2 w[${i}]: expected ${expectedR2[i]}, got ${r2A.payload.weights[i]}`,
+    );
+  }
+
+  // GET /train/:id reflects version 2 and 2 loss_history entries
+  const status = await fetch(`${BASE}/train/${train_id}`).then(r => r.json());
+  assertEquals(status.version, 2);
+  assertEquals(status.loss_history.length, 2);
+
+  clientA.ws.close();
+  clientB.ws.close();
+});
+
+// ─── Test E: DELETE session broadcasts session_closed ─────────────────────────
+
+Deno.test({ name: "DELETE session broadcasts session_closed and removes session", sanitizeOps: false, sanitizeResources: false }, async () => {
+  const res = await fetch(`${BASE}/train`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ weights: [1, 2, 3], quorum: 2, round_duration_ms: 60000 }),
+  });
+  const { train_id } = await res.json();
+
+  // Two clients join
+  const [c1, c2] = await Promise.all([joinClient(train_id), joinClient(train_id)]);
+
+  // Register session_closed listeners before deleting
+  const sc1 = waitForMsg(c1.ws, "session_closed", 3000) as Promise<{ train_id: string }>;
+  const sc2 = waitForMsg(c2.ws, "session_closed", 3000) as Promise<{ train_id: string }>;
+
+  // DELETE the session
+  const delRes = await fetch(`${BASE}/train/${train_id}`, { method: "DELETE" });
+  assertEquals(delRes.status, 200);
+  const delBody = await delRes.json();
+  assertEquals(delBody.deleted, train_id);
+
+  // Both clients receive session_closed
+  const [msg1, msg2] = await Promise.all([sc1, sc2]);
+  assertEquals(msg1.train_id, train_id);
+  assertEquals(msg2.train_id, train_id);
+
+  // Session is gone from the list
+  const listRes = await fetch(`${BASE}/train`);
+  const list = await listRes.json() as { train_id: string }[];
+  assert(!list.some((s) => s.train_id === train_id), "deleted session must not appear in list");
+
+  // GET /train/:id returns 404
+  const getRes = await fetch(`${BASE}/train/${train_id}`);
+  assertEquals(getRes.status, 404);
+
+  // DELETE again returns 404
+  const del2Res = await fetch(`${BASE}/train/${train_id}`, { method: "DELETE" });
+  assertEquals(del2Res.status, 404);
+
+  c1.ws.close();
+  c2.ws.close();
+});
+
+// ─── Test F: WS error handling — invalid messages ─────────────────────────────
+
+Deno.test({ name: "WS error handling: missing train_id, unknown type, invalid session", sanitizeOps: false, sanitizeResources: false }, async () => {
+  const ws = new WebSocket(WS_URL);
+  await new Promise<void>((resolve, reject) => {
+    ws.addEventListener("open", () => resolve(), { once: true });
+    ws.addEventListener("error", () => reject(new Error("WS connection failed")), { once: true });
+  });
+
+  // ── Case 1: message missing train_id ─────────────────────────────────────
+  const err1 = waitForMsg(ws, "error", 2000) as Promise<{ message: string }>;
+  ws.send(JSON.stringify({ type: "join" })); // no train_id
+  const e1 = await err1;
+  assertEquals(e1.message, "missing train_id");
+
+  // ── Case 2: join non-existent session ─────────────────────────────────────
+  const err2 = waitForMsg(ws, "error", 2000) as Promise<{ message: string; train_id: string }>;
+  ws.send(JSON.stringify({ type: "join", train_id: "00000000-0000-0000-0000-000000000000" }));
+  const e2 = await err2;
+  assertEquals(e2.message, "session not found");
+
+  // ── Case 3: unknown message type ──────────────────────────────────────────
+  // Need a valid session for train_id requirement
+  const sessRes = await fetch(`${BASE}/train`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ weights: [0], quorum: 1, round_duration_ms: 60000 }),
+  });
+  const { train_id } = await sessRes.json();
+
+  const err3 = waitForMsg(ws, "error", 2000) as Promise<{ message: string }>;
+  ws.send(JSON.stringify({ type: "ping", train_id }));
+  const e3 = await err3;
+  assert(e3.message.includes("unknown type"), `expected 'unknown type' error, got: ${e3.message}`);
+
+  // ── Case 4: invalid JSON ───────────────────────────────────────────────────
+  const err4 = waitForMsg(ws, "error", 2000) as Promise<{ message: string }>;
+  ws.send("not json at all");
+  const e4 = await err4;
+  assertEquals(e4.message, "invalid JSON");
+
+  ws.close();
+});
+
 // ─── Teardown ─────────────────────────────────────────────────────────────────
 
 Deno.test({ name: "teardown: stop server", sanitizeOps: false, sanitizeResources: false }, () => {
