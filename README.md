@@ -29,7 +29,7 @@ quectoGPT/
 
 Key patterns:
 - **`valueAndGrad`** computes loss and gradients in one call
-- **optax `adam`** with LR schedule (warmup → constant → linear decay)
+- **optax `adam`** with LR schedule (warmup -> constant -> linear decay)
 - **`nn.dotProductAttention`** with `isCausal: true` — no manual per-head loop
 - **Reference counting** via `.ref` for arrays consumed by multiple ops
 - Params stored as nested pytree `{ wte, wpe, lmHead, layers: [{wq, wk, wv, wo, mlpFc1, mlpFc2}, ...] }`
@@ -50,38 +50,35 @@ All configs: char-level tokenizer (27 tokens: a-z + BOS), RMSNorm, ReLU, no bias
 
 ## Quick start
 
-### Node.js (CPU via Wasm)
+### Install dependencies
 
 ```bash
-node train.js                                    # nano, 100 steps
-node train.js --model=small --steps=200          # small model
-node train.js --model=medium                     # medium, uses config defaults
+npm install
 ```
 
-### Deno (WebGPU)
-
-Deno has built-in WebGPU support — the easiest way to run GPU from CLI:
+### Train (CPU via Wasm)
 
 ```bash
-# Install Deno (if needed)
-curl -fsSL https://deno.land/install.sh | sh
-
-# Train on GPU
-deno run --allow-read --allow-net --unstable-webgpu train.js --backend=webgpu --model=small
-deno run --allow-read --allow-net --unstable-webgpu train.js --backend=webgpu --model=medium --steps=100
-
-# GPU benchmarks
-deno run --allow-read --allow-net --unstable-webgpu bench.js --gpu
-
-# CPU benchmarks
-deno run --allow-read --allow-net bench.js --cpu
+deno run --allow-read --allow-net --allow-env train.js                         # nano, 100 steps
+deno run --allow-read --allow-net --allow-env train.js --model=small --steps=200
+deno run --allow-read --allow-net --allow-env train.js --model=medium
 ```
 
-### Benchmarks (Node)
+### Train (WebGPU)
 
 ```bash
-node bench.js           # CPU correctness + benchmarks (default)
-node bench.js --cpu     # explicit CPU
+deno run --allow-read --allow-net --allow-env --unstable-webgpu train.js --backend=webgpu --model=small
+deno run --allow-read --allow-net --allow-env --unstable-webgpu train.js --backend=webgpu --model=medium --steps=100
+```
+
+### Benchmarks
+
+```bash
+# CPU (Wasm)
+deno run --allow-read --allow-net --allow-env bench.js
+
+# WebGPU
+deno run --allow-read --allow-net --allow-env --unstable-webgpu bench.js --gpu
 ```
 
 ### Browser
@@ -92,14 +89,13 @@ python -m http.server
 # or: npx serve .
 ```
 
-No build step — pure ES modules.
+No build step — pure ES modules. Browser uses esm.sh CDN for jax-js.
 
 - **index.html** — training dashboard with real-time loss chart. Auto-detects WebGPU. Model size selector (nano through large), configurable steps, backend toggle.
 - **bench.html** — correctness tests, gradient checks, op-level benchmarks, training benchmark. Supports CPU (Wasm) and WebGPU.
 
 ## Requirements
 
-- **Node.js 18+** for CPU (Wasm) backend
-- **Deno** for WebGPU from CLI (`curl -fsSL https://deno.land/install.sh | sh`)
+- **Deno** — runtime for CLI (`curl -fsSL https://deno.land/install.sh | sh`)
 - **Any modern browser** with WebGPU support (Chrome 113+, Edge 113+) for GPU in browser
-- npm dependencies: `@jax-js/jax` and `@jax-js/optax` (`npm install`). Browser uses esm.sh CDN.
+- npm dependencies: `@jax-js/jax` and `@jax-js/optax` (`npm install`)

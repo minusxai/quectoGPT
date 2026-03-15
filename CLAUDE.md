@@ -6,26 +6,26 @@ quectoGPT is a JavaScript port of Karpathy's microgpt.py — a minimal GPT train
 
 ## How to run
 
+**IMPORTANT: Always use Deno to run JS files, NEVER use Node.** Deno is installed at `~/.deno/bin/deno`. If not on PATH, use the full path. Install: `curl -fsSL https://deno.land/install.sh | sh`, then add `~/.deno/bin` to PATH.
+
 ```bash
-# Train (CPU/Wasm, Node)
-node train.js
-node train.js --backend=cpu --steps=100
+# Train (CPU/Wasm)
+deno run --allow-read --allow-net --allow-env train.js
+deno run --allow-read --allow-net --allow-env train.js --backend=cpu --steps=100
 
-# Train (WebGPU, Deno)
-deno run --allow-read --allow-net --unstable-webgpu train.js --backend=webgpu --steps=100
+# Train (WebGPU)
+deno run --allow-read --allow-net --allow-env --unstable-webgpu train.js --backend=webgpu --steps=100
 
-# Benchmarks (CPU, Node)
-node bench.js
+# Benchmarks (CPU/Wasm)
+deno run --allow-read --allow-net --allow-env bench.js
 
-# Benchmarks (WebGPU, Deno)
-deno run --allow-read --allow-net --unstable-webgpu bench.js --gpu
+# Benchmarks (WebGPU)
+deno run --allow-read --allow-net --allow-env --unstable-webgpu bench.js --gpu
 
 # Browser: serve and open index.html (training) or bench.html (benchmarks)
 python -m http.server
 # or: npx serve .
 ```
-
-**IMPORTANT: Always use Deno to run JS files, NEVER use Node.** Deno is installed at `~/.deno/bin/deno`. If not on PATH, use the full path. Install: `curl -fsSL https://deno.land/install.sh | sh`, then add `~/.deno/bin` to PATH.
 
 ## Architecture
 
@@ -60,8 +60,8 @@ python -m http.server
 ## Testing
 
 ```bash
-node bench.js                                                        # CPU (wasm) correctness + benchmarks
-deno run --allow-read --allow-net --unstable-webgpu bench.js --gpu   # WebGPU correctness + benchmarks
+deno run --allow-read --allow-net --allow-env bench.js                                  # CPU (wasm) correctness + benchmarks
+deno run --allow-read --allow-net --allow-env --unstable-webgpu bench.js --gpu           # WebGPU correctness + benchmarks
 ```
 
 Correctness criteria:
