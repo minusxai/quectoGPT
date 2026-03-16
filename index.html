@@ -814,6 +814,7 @@ let currentQuorum = 0;
 let currentSubmissions = 0;
 let currentDeadlineMs = null;
 let roundLossHistory = [];
+let liveLossHistory = [];  // [{avg_loss}] updated every second via live_loss
 let knownClients = [];
 let countdownTimer = null;
 let lossPingTimer = null;
@@ -1115,7 +1116,8 @@ function drawSessChart() {
   sessCtx.fillStyle = '#0d0d10';
   sessCtx.fillRect(0, 0, W, H);
 
-  const data = roundLossHistory.map(e => e.avg_loss);
+  // Use live loss for the continuous line; fall back to round history if no live data yet
+  const data = liveLossHistory.length >= 1 ? liveLossHistory : roundLossHistory.map(e => e.avg_loss);
   if (data.length < 2) {
     drawSessGrid(W, H, 0, 4, 0, 10);
     return;
@@ -1221,6 +1223,7 @@ function enterSession(trainId) {
   $('controls-bar').hidden = true;
   $('sess-id').textContent = trainId;
   roundLossHistory = [];
+  liveLossHistory = [];
   drawSessChart();
   history.replaceState(null, '', `?session=${trainId}`);
 }
@@ -1237,6 +1240,7 @@ function leaveSession() {
   currentSubmissions = 0;
   currentDeadlineMs = null;
   roundLossHistory = [];
+  liveLossHistory = [];
   knownClients = [];
   abortFlag = true;
   $('panel-lobby').hidden = false;
@@ -1312,9 +1316,11 @@ function handleWsMessage(msg) {
     submitPending = true;
   }
   if (msg.type === 'live_loss') {
+    liveLossHistory.push(msg.avg_loss);
     const lossEl = $('sess-loss-big');
     lossEl.textContent = msg.avg_loss.toFixed(3);
     lossEl.classList.remove('idle');
+    drawSessChart();
   }
   if (msg.type === 'publish_ack') {
     currentSubmissions = msg.submissions;
@@ -1389,6 +1395,7 @@ async function startFederatedTraining(initialWeights) {
   running = true;
   abortFlag = false;
   trainingHandle = {};
+  liveLossHistory = [];
   roundSteps = 0; roundLossSum = 0; roundTokens = 0;
   roundStartFlat = initialWeights?.length > 0 ? new Float32Array(initialWeights) : null;
 
