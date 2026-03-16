@@ -1457,17 +1457,24 @@ async function startFederatedTraining(initialWeights) {
         if (stepCount % 5 === 0) drawChart();
         if (stepCount % 2 === 0) await new Promise(r => requestAnimationFrame(r));
 
+        // Update session chart locally every 5 steps (no server roundtrip needed)
+        liveLossHistory.push(event.loss);
+        if (stepCount % 5 === 0) drawSessChart();
+
+        if (event.samples) showSamples(event.samples);
+
         if (submitPending) {
           submitPending = false;
           submitDelta();
-          abortFlag = true; // stop training after submit; handleWsMessage restarts with new weights
+          $('banner-submit').hidden = true;
+          abortFlag = true;
           break;
         }
       }
 
       if (event.type === 'done') {
         showSamples(event.samples);
-        drawChart();
+        drawSessChart();
       }
     }
 
