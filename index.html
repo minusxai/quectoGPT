@@ -1133,8 +1133,8 @@ function drawSessChart() {
   minL -= range * 0.05;
   maxL += range * 0.05;
 
-  const minX = roundLossHistory[0].version;
-  const maxX = roundLossHistory[roundLossHistory.length - 1].version;
+  const minX = 0;
+  const maxX = data.length - 1;
   drawSessGrid(W, H, minL, maxL, minX, maxX, pad);
 
   sessCtx.save();
