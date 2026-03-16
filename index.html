@@ -1395,7 +1395,6 @@ async function startFederatedTraining(initialWeights) {
   running = true;
   abortFlag = false;
   trainingHandle = {};
-  liveLossHistory = [];
   roundSteps = 0; roundLossSum = 0; roundTokens = 0;
   roundStartFlat = initialWeights?.length > 0 ? new Float32Array(initialWeights) : null;
 
