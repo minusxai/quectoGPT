@@ -20,6 +20,7 @@ type TrainSession = {
   loss_sum: number;
   loss_count: number;
   loss_history: { version: number; avg_loss: number }[];
+  live_losses: Map<WebSocket, { loss: number; tokens: number }>;
 };
 
 type PublishPayload = {
@@ -185,6 +186,20 @@ function handlePublish(ws: WebSocket, train_id: string, payload: PublishPayload)
   }
 }
 
+function broadcastLiveLoss(session: TrainSession) {
+  if (session.live_losses.size === 0) return;
+  let lossSum = 0, tokenSum = 0;
+  for (const { loss, tokens } of session.live_losses.values()) {
+    lossSum += loss * tokens;
+    tokenSum += tokens;
+  }
+  const avg_loss = tokenSum > 0 ? lossSum / tokenSum : 0;
+  const msg = { type: "live_loss", train_id: session.train_id, avg_loss, clients: session.live_losses.size };
+  for (const ws of session.clients) {
+    if (ws.readyState === WebSocket.OPEN) send(ws, msg);
+  }
+}
+
 // Timer: check grace period and deadlines every 250ms for timely submit_request delivery
 setInterval(() => {
   const now = Date.now();
@@ -239,26 +254,30 @@ function handleWebSocket(req: Request): Response {
         return;
       }
       handlePublish(ws, train_id, msg.payload);
+    } else if (type === "loss_ping") {
+      const session = sessions.get(train_id);
+      if (session) {
+        const { loss, tokens } = msg as { loss: number; tokens: number; train_id: string };
+        if (typeof loss === "number" && typeof tokens === "number" && tokens > 0) {
+          session.live_losses.set(ws, { loss, tokens });
+          broadcastLiveLoss(session);
+        }
+      }
     } else {
       send(ws, { type: "error", message: `unknown type: ${type}` });
     }
   };
 
-  ws.onclose = () => {
+  const cleanupWs = () => {
     for (const session of sessions.values()) {
       session.clients.delete(ws);
       session.client_list.delete(ws);
+      session.live_losses.delete(ws);
       if (session.clients.size > 0) broadcastClientsChanged(session);
     }
   };
-
-  ws.onerror = () => {
-    for (const session of sessions.values()) {
-      session.clients.delete(ws);
-      session.client_list.delete(ws);
-      if (session.clients.size > 0) broadcastClientsChanged(session);
-    }
-  };
+  ws.onclose = cleanupWs;
+  ws.onerror = cleanupWs;
 
   return response;
 }
@@ -321,6 +340,7 @@ Deno.serve({ port: PORT }, async (req) => {
       loss_sum: 0,
       loss_count: 0,
       loss_history: [],
+      live_losses: new Map(),
     };
 
     sessions.set(train_id, session);

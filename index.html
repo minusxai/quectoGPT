@@ -701,7 +701,7 @@
 
     <div class="control-group">
       <span class="control-label">Steps</span>
-      <input type="number" class="input-field" id="input-steps" value="1500" min="1" max="50000" placeholder="auto">
+      <input type="number" class="input-field" id="input-steps" value="9999" min="1" max="50000" placeholder="auto">
     </div>
 
     <div class="control-group">
@@ -816,6 +816,7 @@ let currentDeadlineMs = null;
 let roundLossHistory = [];
 let knownClients = [];
 let countdownTimer = null;
+let lossPingTimer = null;
 // Per-round training tracking
 let roundSteps = 0;
 let roundLossSum = 0;
@@ -1226,8 +1227,8 @@ function enterSession(trainId) {
 
 function leaveSession() {
   if (ws) { ws.close(); ws = null; }
-  clearInterval(countdownTimer);
-  countdownTimer = null;
+  clearInterval(countdownTimer); countdownTimer = null;
+  clearInterval(lossPingTimer); lossPingTimer = null;
   inSession = false;
   myClientId = null;
   currentTrainId = null;
@@ -1309,6 +1310,11 @@ function handleWsMessage(msg) {
   if (msg.type === 'submit_request') {
     $('banner-submit').hidden = false;
     submitPending = true;
+  }
+  if (msg.type === 'live_loss') {
+    const lossEl = $('sess-loss-big');
+    lossEl.textContent = msg.avg_loss.toFixed(3);
+    lossEl.classList.remove('idle');
   }
   if (msg.type === 'publish_ack') {
     currentSubmissions = msg.submissions;
@@ -1401,8 +1407,19 @@ async function startFederatedTraining(initialWeights) {
     const model = $('input-model').value;
     const t0 = performance.now();
     let stepCount = 0;
+    let lastLoss = null;
+    let pingTokens = 0;
 
     $('stat-status').textContent = 'training';
+
+    // Send token-weighted live loss to server every second
+    clearInterval(lossPingTimer);
+    lossPingTimer = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN && lastLoss !== null && pingTokens > 0) {
+        ws.send(JSON.stringify({ type: 'loss_ping', train_id: currentTrainId, loss: lastLoss, tokens: pingTokens }));
+        pingTokens = 0;
+      }
+    }, 1000);
 
     const promptVal = $('input-prompt').value.trim();
     const valEveryVal = parseInt($('input-valevery').value.trim()) || undefined;
@@ -1420,6 +1437,8 @@ async function startFederatedTraining(initialWeights) {
 
       if (event.type === 'step') {
         stepCount++;
+        lastLoss = event.loss;
+        pingTokens += event.batchSize ?? 8;
         lossHistory.push(event.loss);
         roundSteps++;
         roundLossSum += event.loss;
@@ -1444,6 +1463,8 @@ async function startFederatedTraining(initialWeights) {
         drawChart();
       }
     }
+
+    clearInterval(lossPingTimer);
 
     $('stat-status').textContent = inSession ? 'training' : 'stopped';
   } catch (err) {
