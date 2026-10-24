@@ -1,0 +1,33 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PORT: '4000'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: denoland/setup-deno@v2.0.5
+        with:
+          deno-version: v2.9.8
+      - run: deno test --allow-net --allow-read --allow-run server_test.ts
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.23.4'
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=low
