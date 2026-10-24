@@ -33,6 +33,11 @@ jobs:
         run: npm install --global npm@12.2.1 --ignore-scripts && node container/patch-npm.mjs
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=low
+      - name: Reclaim unused hosted runner SDK space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - run: docker build -f Dockerfile.web -t web-check .
       - name: Check web assets
         shell: bash
@@ -45,3 +50,51 @@ jobs:
           done
           test -s /tmp/index.html
           curl --fail --silent http://127.0.0.1:7011/node_modules/@jax-js/jax/package.json | python -c 'import json,sys; assert json.load(sys.stdin)["name"] == "@jax-js/jax"'
+      - name: Check installed XML parser provenance
+        run: docker run --rm --entrypoint sh web-check -ec 'apk list --installed libexpat | grep -q "^libexpat-2.9.0_p20261023-r0 "; cd /usr/share/doc/libexpat/patches; sha256sum -c SHA256SUMS'
+      - name: Release completed build cache
+        run: docker builder prune --all --force
+      - name: Record all image dependencies
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: 'v0.76.1'
+          image-ref: web-check
+          scan-type: image
+          scanners: vuln
+          format: json
+          output: image-scan.raw.json
+          list-all-pkgs: 'true'
+          ignore-unfixed: 'false'
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: '0'
+          timeout: 10m
+      - name: Prepare dependency report
+        working-directory: ${{ github.workspace }}
+        env:
+          SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY_REPORT'
+          import hashlib, json, os
+          from pathlib import Path
+          raw = json.loads(Path('image-scan.raw.json').read_text())
+          files = ['Dockerfile.web', 'package-lock.json'] + [str(p) for p in sorted(Path('container/expat-patches').glob('*'))]
+          report = {
+              'source_head': os.environ['SOURCE_HEAD'],
+              'checkout_sha': os.environ['CHECKOUT_SHA'],
+              'source_hashes': {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in files},
+              'SchemaVersion': raw['SchemaVersion'],
+              'ArtifactName': 'web-check',
+              'ArtifactType': raw.get('ArtifactType'),
+              'Metadata': {k: raw.get('Metadata', {}).get(k) for k in ('ImageID', 'DiffIDs', 'OS')},
+              'Results': raw.get('Results', []),
+              'coverage_limits': 'All recognized installed component findings retained. Separate upstream-unfixed Expat CVE-2025-66382 remains unresolved; scanner silence is not comprehensive clearance.'
+          }
+          Path('image-report.json').write_text(json.dumps(report, indent=2) + '\n')
+          PY_REPORT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-dependencies
+          path: image-report.json
+          if-no-files-found: error
+          retention-days: 7

@@ -5,7 +5,39 @@ RUN npm install --global npm@12.2.1 --ignore-scripts && node /tmp/patch-npm.mjs 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
 
-FROM nginx:1.31.8-alpine@sha256:a3554c0d0b48177b1413c26e01f695334428020d9df01243fbae3e11cfd17417
+FROM nginx:1.31.8-alpine@sha256:a3554c0d0b48177b1413c26e01f695334428020d9df01243fbae3e11cfd17417 AS upstream
+FROM upstream AS expat-build
+RUN apk add --no-cache build-base autoconf automake libtool openssl bash
+ADD --checksum=sha256:16afbb9cefead2aa278105cf27d9f597bde7fbf3dbb85015857ca7ca6a4e89ba https://github.com/libexpat/libexpat/releases/download/R_2_9_0/expat-2.9.0.tar.gz /tmp/expat.tar.gz
+COPY container/expat-patches /patches
+RUN cd /patches && sha256sum -c SHA256SUMS
+RUN mkdir /build && tar -xzf /tmp/expat.tar.gz --strip-components=1 -C /build
+WORKDIR /build
+RUN patch --batch --fuzz=0 -p2 < /patches/00-amplification.patch && patch --batch --fuzz=0 -p2 < /patches/01-reset.patch \
+    && CFLAGS="-O2 -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3" LDFLAGS="-Wl,-z,relro,-z,now" ./configure --prefix=/usr --disable-static --without-docbook \
+    && make -j2 && make check && make DESTDIR=/stage install
+RUN mkdir -p /pkg/usr/lib /pkg/usr/share/doc/libexpat /out \
+    && cp -a /stage/usr/lib/libexpat.so.* /pkg/usr/lib/ \
+    && cp COPYING /pkg/usr/share/doc/libexpat/copyright && cp tests/test-suite.log /pkg/usr/share/doc/libexpat/upstream-tests.log && cp -a /patches /pkg/usr/share/doc/libexpat/patches \
+    && openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/runtime.rsa \
+    && openssl pkey -in /tmp/runtime.rsa -pubout -out /out/runtime-expat.rsa.pub \
+    && apk mkpkg --sign-key /tmp/runtime.rsa --files /pkg --output /out/libexpat.apk \
+       --info name:libexpat --info version:2.9.0_p20261023-r0 --info arch:$(apk --print-arch) \
+       --info origin:expat --info license:MIT --info url:https://libexpat.github.io/ \
+       --info description:'Expat XML parser with upstream security backports' \
+       --info depends:so:libc.musl-$(apk --print-arch).so.1 --info provides:so:libexpat.so.1=1.13.0 \
+    && cp /out/runtime-expat.rsa.pub /etc/apk/keys/ && apk verify /out/libexpat.apk \
+    && cc /patches/check-xml.c -I/stage/usr/include -L/stage/usr/lib -lexpat -o /out/check-xml \
+    && LD_LIBRARY_PATH=/stage/usr/lib /out/check-xml \
+    && rm /tmp/runtime.rsa
+
+FROM upstream
+COPY --from=expat-build /out/runtime-expat.rsa.pub /etc/apk/keys/runtime-expat.rsa.pub
+COPY --from=expat-build /out/libexpat.apk /out/check-xml /tmp/
+RUN apk verify /tmp/libexpat.apk && apk add --no-cache /tmp/libexpat.apk \
+    && /tmp/check-xml && apk list --installed libexpat | grep -q '^libexpat-2.9.0_p20261023-r0 ' \
+    && cd /usr/share/doc/libexpat/patches && sha256sum -c SHA256SUMS \
+    && rm /tmp/libexpat.apk /tmp/check-xml
 COPY --from=deps /app/node_modules /usr/share/nginx/html/node_modules
 COPY . /usr/share/nginx/html/
 RUN apk upgrade --no-cache && sed -i 's/listen\s*80;/listen 7011;/g' /etc/nginx/conf.d/default.conf
