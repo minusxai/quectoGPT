@@ -29,5 +29,19 @@ jobs:
         with:
           node-version: '22.23.4'
           cache: npm
-      - run: npm ci
+      - name: Refresh package manager
+        run: npm install --global npm@12.2.1 --ignore-scripts && node container/patch-npm.mjs
+      - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=low
+      - run: docker build -f Dockerfile.web -t web-check .
+      - name: Check web assets
+        shell: bash
+        run: |
+          docker run -d --name web-check -p 127.0.0.1:7011:7011 web-check
+          trap 'docker rm -f web-check' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:7011/ > /tmp/index.html; then break; fi
+            sleep 1
+          done
+          test -s /tmp/index.html
+          curl --fail --silent http://127.0.0.1:7011/node_modules/@jax-js/jax/package.json | python -c 'import json,sys; assert json.load(sys.stdin)["name"] == "@jax-js/jax"'
